@@ -2,6 +2,7 @@ import { Pool } from "pg";
 import {
   buildHostedAudioChunkObjectPath,
   HOSTED_ENV_KEYS,
+  type HostedActionItemRecord,
   type HostedAudioChunkRecord,
   type HostedAudioChunkUploadRequest,
   type HostedModelRunKind,
@@ -10,7 +11,11 @@ import {
   type HostedPersistenceBackend,
   type HostedPersistenceRepository,
   type HostedPersistenceSnapshot,
+  type HostedSessionNoteRecord,
+  type HostedTranscriptSegmentRecord,
   type HostedSessionCreateRequest,
+  type HostedSessionSummaryRecord,
+  type HostedSessionStopRequest,
   type HostedSessionEventCreateRequest,
   type HostedSessionEventRecord,
   type HostedSessionRecord,
@@ -46,6 +51,33 @@ function cloneModelRun(modelRun: HostedModelRunRecord): HostedModelRunRecord {
   };
 }
 
+function cloneTranscriptSegment(segment: HostedTranscriptSegmentRecord): HostedTranscriptSegmentRecord {
+  return {
+    ...segment
+  };
+}
+
+function cloneSessionNote(note: HostedSessionNoteRecord): HostedSessionNoteRecord {
+  return {
+    ...note,
+    sourceSegmentIds: [...note.sourceSegmentIds]
+  };
+}
+
+function cloneSessionSummary(summary: HostedSessionSummaryRecord): HostedSessionSummaryRecord {
+  return {
+    ...summary,
+    keyPoints: [...summary.keyPoints],
+    followUps: [...summary.followUps]
+  };
+}
+
+function cloneActionItem(actionItem: HostedActionItemRecord): HostedActionItemRecord {
+  return {
+    ...actionItem
+  };
+}
+
 function cloneSessionEvent(event: HostedSessionEventRecord): HostedSessionEventRecord {
   return {
     ...event,
@@ -69,6 +101,26 @@ function updateSessionStatus(
   };
 }
 
+function sessionRejectsNewAudio(session: HostedSessionRecord) {
+  return session.status === "complete" || session.status === "failed" || session.status === "processing";
+}
+
+function buildHostedSessionMetadata(request: HostedSessionCreateRequest) {
+  const metadata: Record<string, string | number | boolean | null> = {
+    ...(request.metadata ?? {})
+  };
+
+  metadata.captureStrategy = request.captureStrategy ?? (request.sourceType === "microphone" ? "microphone" : "display-media-audio");
+
+  if (request.sourceType === "meeting-helper" && request.meetingSurface) {
+    metadata.meetingSurface = request.meetingSurface;
+  } else {
+    delete metadata.meetingSurface;
+  }
+
+  return metadata;
+}
+
 export class InMemoryHostedRepository implements HostedPersistenceRepository {
   private readonly sessions = new Map<string, HostedSessionRecord>();
 
@@ -90,8 +142,18 @@ export class InMemoryHostedRepository implements HostedPersistenceRepository {
     return "memory";
   }
 
+  async checkHealth() {
+    return {
+      ok: true,
+      backend: "memory" as const,
+      detail: "In-memory repository ready.",
+      checkedAt: now()
+    };
+  }
+
   async createSession(request: HostedSessionCreateRequest): Promise<HostedSessionRecord> {
     const createdAt = now();
+    const metadata = buildHostedSessionMetadata(request);
     const session: HostedSessionRecord = {
       id: createId("session"),
       userId: request.userId ?? "demo-user",
@@ -101,7 +163,7 @@ export class InMemoryHostedRepository implements HostedPersistenceRepository {
       updatedAt: createdAt,
       startedAt: null,
       endedAt: null,
-      metadata: {}
+      metadata
     };
 
     this.sessions.set(session.id, session);
@@ -109,7 +171,8 @@ export class InMemoryHostedRepository implements HostedPersistenceRepository {
       type: "session.created",
       payload: {
         sourceType: request.sourceType,
-        userId: session.userId
+        userId: session.userId,
+        metadata
       }
     });
 
@@ -126,10 +189,42 @@ export class InMemoryHostedRepository implements HostedPersistenceRepository {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  async listTranscriptSegments(sessionId: string, sinceSequenceNumber?: number): Promise<readonly HostedTranscriptSegmentRecord[]> {
+    return [...this.transcriptSegments]
+      .filter((segment) => segment.sessionId === sessionId)
+      .filter((segment) => sinceSequenceNumber === undefined || segment.sequenceNumber > sinceSequenceNumber)
+      .map((segment) => cloneTranscriptSegment(segment))
+      .sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+  }
+
+  async listSessionNotes(sessionId: string): Promise<readonly HostedSessionNoteRecord[]> {
+    return [...this.sessionNotes]
+      .filter((note) => note.sessionId === sessionId)
+      .map((note) => cloneSessionNote(note))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async listSessionSummaries(sessionId: string): Promise<readonly HostedSessionSummaryRecord[]> {
+    return [...this.sessionSummaries]
+      .filter((summary) => summary.sessionId === sessionId)
+      .map((summary) => cloneSessionSummary(summary))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async listActionItems(sessionId: string): Promise<readonly HostedActionItemRecord[]> {
+    return [...this.actionItems]
+      .filter((actionItem) => actionItem.sessionId === sessionId)
+      .map((actionItem) => cloneActionItem(actionItem))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   async registerAudioChunk(sessionId: string, request: HostedAudioChunkUploadRequest): Promise<HostedAudioChunkRecord> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} does not exist.`);
+    }
+    if (sessionRejectsNewAudio(session)) {
+      throw new Error(`Session ${sessionId} is no longer accepting audio chunks.`);
     }
 
     const chunkId = `${sessionId}-chunk-${String(request.chunkIndex).padStart(6, "0")}`;
@@ -148,7 +243,7 @@ export class InMemoryHostedRepository implements HostedPersistenceRepository {
       startedAt: request.startedAt,
       endedAt: request.endedAt,
       objectPath: buildHostedAudioChunkObjectPath(sessionId, request.chunkIndex, request.mimeType),
-      status: "registered",
+      status: "complete",
       createdAt,
       metadata: request.byteLength !== undefined ? { byteLength: request.byteLength } : {}
     };
@@ -179,23 +274,71 @@ export class InMemoryHostedRepository implements HostedPersistenceRepository {
       .sort((a, b) => a.chunkIndex - b.chunkIndex);
   }
 
-  async stopSession(sessionId: string): Promise<HostedSessionRecord> {
+  async listModelRuns(sessionId: string): Promise<readonly HostedModelRunRecord[]> {
+    return [...(this.modelRunsBySession.get(sessionId) ?? [])]
+      .map((modelRun) => cloneModelRun(modelRun))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async stopSession(sessionId: string, request?: HostedSessionStopRequest): Promise<HostedSessionRecord> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} does not exist.`);
     }
 
+    const requestedStatus = request?.status ?? "complete";
     const endedAt = now();
-    const updated = updateSessionStatus(session, "complete", {
-      startedAt: session.startedAt ?? session.createdAt,
-      endedAt
-    });
+    const existingChunks = this.audioChunksBySession.get(sessionId) ?? [];
+    const uploadedChunkCount = existingChunks.filter((chunk) => chunk.status !== "failed").length;
+    let terminalizedChunkCount = 0;
+    if (requestedStatus === "failed") {
+      this.audioChunksBySession.set(
+        sessionId,
+        existingChunks.map((chunk) => {
+          if (chunk.status !== "registered" && chunk.status !== "queued") {
+            return chunk;
+          }
+          terminalizedChunkCount += 1;
+          return {
+            ...chunk,
+            status: "failed",
+            metadata: {
+              ...chunk.metadata,
+              failedAt: endedAt,
+              errorMessage: request?.errorMessage ?? "Session stopped before queued chunks could be transcribed."
+            }
+          };
+        })
+      );
+    }
+    const pendingChunkCount = 0;
+    const status = requestedStatus === "failed" ? "failed" : uploadedChunkCount > 0 ? "processing" : "complete";
+    const metadata = { ...session.metadata };
+    metadata.captureStoppedAt = endedAt;
+    metadata.awaitingFinalTranscript = requestedStatus === "complete" && uploadedChunkCount > 0;
+    if (request?.errorMessage && request.errorMessage.trim().length > 0) {
+      metadata.errorMessage = request.errorMessage;
+    } else if (requestedStatus !== "failed") {
+      delete metadata.errorMessage;
+    }
+    const updated = {
+      ...updateSessionStatus(session, status, {
+        startedAt: session.startedAt ?? session.createdAt,
+        endedAt
+      }),
+      metadata
+    };
     this.sessions.set(sessionId, updated);
     await this.appendSessionEvent(sessionId, {
       type: "session.updated",
       payload: {
-        status: "complete",
-        endedAt
+        requestedStatus,
+        status,
+        endedAt,
+        pendingChunkCount,
+        uploadedChunkCount,
+        terminalizedChunkCount,
+        errorMessage: request?.errorMessage ?? null
       }
     });
     return cloneSession(updated);
@@ -315,6 +458,56 @@ function mapModelRunRow(row: Record<string, unknown>): HostedModelRunRecord {
   };
 }
 
+function mapTranscriptSegmentRow(row: Record<string, unknown>): HostedTranscriptSegmentRecord {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    audioChunkId: row.audio_chunk_id ? String(row.audio_chunk_id) : null,
+    modelRunId: row.model_run_id ? String(row.model_run_id) : null,
+    sequenceNumber: Number(row.sequence_number),
+    speakerLabel: row.speaker_label ? String(row.speaker_label) : null,
+    text: String(row.text),
+    startMs: Number(row.start_ms),
+    endMs: Number(row.end_ms),
+    confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
+    createdAt: new Date(String(row.created_at)).toISOString()
+  };
+}
+
+function mapSessionNoteRow(row: Record<string, unknown>): HostedSessionNoteRecord {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    modelRunId: row.model_run_id ? String(row.model_run_id) : null,
+    sourceSegmentIds: Array.isArray(row.source_segment_ids) ? (row.source_segment_ids as string[]) : [],
+    text: String(row.text),
+    createdAt: new Date(String(row.created_at)).toISOString()
+  };
+}
+
+function mapSessionSummaryRow(row: Record<string, unknown>): HostedSessionSummaryRecord {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    modelRunId: row.model_run_id ? String(row.model_run_id) : null,
+    overview: String(row.overview),
+    keyPoints: Array.isArray(row.key_points) ? (row.key_points as string[]) : [],
+    followUps: Array.isArray(row.follow_ups) ? (row.follow_ups as string[]) : [],
+    createdAt: new Date(String(row.created_at)).toISOString()
+  };
+}
+
+function mapActionItemRow(row: Record<string, unknown>): HostedActionItemRecord {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    sourceSummaryId: row.source_summary_id ? String(row.source_summary_id) : null,
+    text: String(row.text),
+    status: String(row.status) as HostedActionItemRecord["status"],
+    createdAt: new Date(String(row.created_at)).toISOString()
+  };
+}
+
 function mapSessionEventRow(row: Record<string, unknown>): HostedSessionEventRecord {
   return {
     id: String(row.id),
@@ -332,10 +525,32 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
     return "postgres";
   }
 
+  async checkHealth() {
+    const checkedAt = now();
+
+    try {
+      await this.pool.query("SELECT 1");
+      return {
+        ok: true,
+        backend: "postgres" as const,
+        detail: "PostgreSQL repository ready.",
+        checkedAt
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        backend: "postgres" as const,
+        detail: error instanceof Error ? error.message : "PostgreSQL repository unavailable.",
+        checkedAt
+      };
+    }
+  }
+
   async createSession(request: HostedSessionCreateRequest): Promise<HostedSessionRecord> {
     const client = await this.pool.connect();
     const sessionId = createId("session");
     const userId = request.userId ?? "demo-user";
+    const metadata = buildHostedSessionMetadata(request);
 
     try {
       await client.query("BEGIN");
@@ -352,17 +567,25 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
           INSERT INTO sessions (
             id, user_id, source_type, status, metadata
           )
-          VALUES ($1, $2, $3, 'starting', '{}'::jsonb)
+          VALUES ($1, $2, $3, 'starting', $4::jsonb)
           RETURNING *
         `,
-        [sessionId, userId, request.sourceType]
+        [sessionId, userId, request.sourceType, JSON.stringify(metadata)]
       );
       await client.query(
         `
           INSERT INTO session_events (id, session_id, type, payload)
           VALUES ($1, $2, 'session.created', $3::jsonb)
         `,
-        [createId("event"), sessionId, JSON.stringify({ sourceType: request.sourceType, userId })]
+        [
+          createId("event"),
+          sessionId,
+          JSON.stringify({
+            sourceType: request.sourceType,
+            userId,
+            metadata
+          })
+        ]
       );
       await client.query("COMMIT");
       return mapSessionRow(sessionResult.rows[0] as Record<string, unknown>);
@@ -384,6 +607,44 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
     return result.rows.map((row) => mapSessionRow(row as Record<string, unknown>));
   }
 
+  async listTranscriptSegments(sessionId: string, sinceSequenceNumber?: number): Promise<readonly HostedTranscriptSegmentRecord[]> {
+    const params: Array<string | number> = [sessionId];
+    let query = "SELECT * FROM transcript_segments WHERE session_id = $1";
+
+    if (sinceSequenceNumber !== undefined) {
+      params.push(sinceSequenceNumber);
+      query += " AND sequence_number > $2";
+    }
+
+    query += " ORDER BY sequence_number ASC";
+    const result = await this.pool.query(query, params);
+    return result.rows.map((row) => mapTranscriptSegmentRow(row as Record<string, unknown>));
+  }
+
+  async listSessionNotes(sessionId: string): Promise<readonly HostedSessionNoteRecord[]> {
+    const result = await this.pool.query(
+      "SELECT * FROM session_notes WHERE session_id = $1 ORDER BY created_at ASC",
+      [sessionId]
+    );
+    return result.rows.map((row) => mapSessionNoteRow(row as Record<string, unknown>));
+  }
+
+  async listSessionSummaries(sessionId: string): Promise<readonly HostedSessionSummaryRecord[]> {
+    const result = await this.pool.query(
+      "SELECT * FROM session_summaries WHERE session_id = $1 ORDER BY created_at ASC",
+      [sessionId]
+    );
+    return result.rows.map((row) => mapSessionSummaryRow(row as Record<string, unknown>));
+  }
+
+  async listActionItems(sessionId: string): Promise<readonly HostedActionItemRecord[]> {
+    const result = await this.pool.query(
+      "SELECT * FROM action_items WHERE session_id = $1 ORDER BY created_at ASC",
+      [sessionId]
+    );
+    return result.rows.map((row) => mapActionItemRow(row as Record<string, unknown>));
+  }
+
   async registerAudioChunk(sessionId: string, request: HostedAudioChunkUploadRequest): Promise<HostedAudioChunkRecord> {
     const client = await this.pool.connect();
     const chunkId = `${sessionId}-chunk-${String(request.chunkIndex).padStart(6, "0")}`;
@@ -395,6 +656,10 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
       const session = sessionResult.rows[0];
       if (!session) {
         throw new Error(`Session ${sessionId} does not exist.`);
+      }
+      const mappedSession = mapSessionRow(session as Record<string, unknown>);
+      if (sessionRejectsNewAudio(mappedSession)) {
+        throw new Error(`Session ${sessionId} is no longer accepting audio chunks.`);
       }
 
       const existingChunkResult = await client.query(
@@ -411,7 +676,7 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
           INSERT INTO audio_chunks (
             id, session_id, chunk_index, mime_type, started_at, ended_at, object_path, status, metadata
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, 'registered', $8::jsonb)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, 'complete', $8::jsonb)
           RETURNING *
         `,
         [
@@ -473,7 +738,15 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
     return result.rows.map((row) => mapAudioChunkRow(row as Record<string, unknown>));
   }
 
-  async stopSession(sessionId: string): Promise<HostedSessionRecord> {
+  async listModelRuns(sessionId: string): Promise<readonly HostedModelRunRecord[]> {
+    const result = await this.pool.query(
+      "SELECT * FROM model_runs WHERE session_id = $1 ORDER BY created_at ASC",
+      [sessionId]
+    );
+    return result.rows.map((row) => mapModelRunRow(row as Record<string, unknown>));
+  }
+
+  async stopSession(sessionId: string, request?: HostedSessionStopRequest): Promise<HostedSessionRecord> {
     const client = await this.pool.connect();
 
     try {
@@ -484,18 +757,68 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
         throw new Error(`Session ${sessionId} does not exist.`);
       }
 
+      const requestedStatus = request?.status ?? "complete";
       const endedAt = now();
+      const terminalizedChunkResult =
+        requestedStatus === "failed"
+          ? await client.query(
+              `
+                UPDATE audio_chunks
+                SET status = 'failed',
+                    metadata = COALESCE(metadata, '{}'::jsonb)
+                      || jsonb_build_object(
+                           'failedAt', $2::text,
+                           'errorMessage', $3::text
+                         )
+                WHERE session_id = $1
+                  AND status IN ('registered', 'queued')
+                RETURNING id
+              `,
+              [
+                sessionId,
+                endedAt,
+                request?.errorMessage ?? "Session stopped before queued chunks could be transcribed."
+              ]
+            )
+          : { rowCount: 0 };
+      const terminalizedChunkCount = Number(terminalizedChunkResult.rowCount ?? 0);
+      const uploadedChunkResult =
+        requestedStatus === "complete"
+          ? await client.query(
+              `
+                SELECT COUNT(*)::int AS uploaded_chunk_count
+                FROM audio_chunks
+                WHERE session_id = $1
+                  AND status != 'failed'
+              `,
+              [sessionId]
+            )
+          : { rows: [{ uploaded_chunk_count: 0 }] };
+      const uploadedChunkCount = Number(uploadedChunkResult.rows[0]?.uploaded_chunk_count ?? 0);
+      const pendingChunkCount = 0;
+      const status = requestedStatus === "failed" ? "failed" : uploadedChunkCount > 0 ? "processing" : "complete";
+      const metadata: Record<string, string | number | boolean | null> = {
+        ...(((session.metadata ?? {}) as Record<string, string | number | boolean | null>) ?? {}),
+        captureStoppedAt: endedAt
+      };
+      metadata.awaitingFinalTranscript = requestedStatus === "complete" && uploadedChunkCount > 0;
+      if (request?.errorMessage && request.errorMessage.trim().length > 0) {
+        metadata.errorMessage = request.errorMessage;
+      } else if (requestedStatus !== "failed") {
+        delete metadata.errorMessage;
+      }
       const stoppedResult = await client.query(
         `
           UPDATE sessions
-          SET status = 'complete',
+          SET status = $3,
               started_at = COALESCE(started_at, created_at),
               ended_at = $2::timestamptz,
+              metadata = $4::jsonb,
               updated_at = NOW()
           WHERE id = $1
           RETURNING *
         `,
-        [sessionId, endedAt]
+        [sessionId, endedAt, status, JSON.stringify(metadata)]
       );
 
       await client.query(
@@ -507,8 +830,13 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
           createId("event"),
           sessionId,
           JSON.stringify({
-            status: "complete",
-            endedAt
+            requestedStatus,
+            status,
+            endedAt,
+            pendingChunkCount,
+            uploadedChunkCount,
+            terminalizedChunkCount,
+            errorMessage: request?.errorMessage ?? null
           })
         ]
       );
@@ -619,44 +947,10 @@ export class PostgresHostedRepository implements HostedPersistenceRepository {
     return {
       sessions: sessions.rows.map((row) => mapSessionRow(row as Record<string, unknown>)),
       audioChunks: audioChunks.rows.map((row) => mapAudioChunkRow(row as Record<string, unknown>)),
-      transcriptSegments: transcriptSegments.rows.map((row) => ({
-        id: String(row.id),
-        sessionId: String(row.session_id),
-        audioChunkId: row.audio_chunk_id ? String(row.audio_chunk_id) : null,
-        modelRunId: row.model_run_id ? String(row.model_run_id) : null,
-        sequenceNumber: Number(row.sequence_number),
-        speakerLabel: row.speaker_label ? String(row.speaker_label) : null,
-        text: String(row.text),
-        startMs: Number(row.start_ms),
-        endMs: Number(row.end_ms),
-        confidence: row.confidence === null || row.confidence === undefined ? null : Number(row.confidence),
-        createdAt: new Date(String(row.created_at)).toISOString()
-      })),
-      sessionNotes: sessionNotes.rows.map((row) => ({
-        id: String(row.id),
-        sessionId: String(row.session_id),
-        modelRunId: row.model_run_id ? String(row.model_run_id) : null,
-        sourceSegmentIds: Array.isArray(row.source_segment_ids) ? (row.source_segment_ids as string[]) : [],
-        text: String(row.text),
-        createdAt: new Date(String(row.created_at)).toISOString()
-      })),
-      sessionSummaries: sessionSummaries.rows.map((row) => ({
-        id: String(row.id),
-        sessionId: String(row.session_id),
-        modelRunId: row.model_run_id ? String(row.model_run_id) : null,
-        overview: String(row.overview),
-        keyPoints: Array.isArray(row.key_points) ? (row.key_points as string[]) : [],
-        followUps: Array.isArray(row.follow_ups) ? (row.follow_ups as string[]) : [],
-        createdAt: new Date(String(row.created_at)).toISOString()
-      })),
-      actionItems: actionItems.rows.map((row) => ({
-        id: String(row.id),
-        sessionId: String(row.session_id),
-        sourceSummaryId: row.source_summary_id ? String(row.source_summary_id) : null,
-        text: String(row.text),
-        status: String(row.status) as HostedPersistenceSnapshot["actionItems"][number]["status"],
-        createdAt: new Date(String(row.created_at)).toISOString()
-      })),
+      transcriptSegments: transcriptSegments.rows.map((row) => mapTranscriptSegmentRow(row as Record<string, unknown>)),
+      sessionNotes: sessionNotes.rows.map((row) => mapSessionNoteRow(row as Record<string, unknown>)),
+      sessionSummaries: sessionSummaries.rows.map((row) => mapSessionSummaryRow(row as Record<string, unknown>)),
+      actionItems: actionItems.rows.map((row) => mapActionItemRow(row as Record<string, unknown>)),
       modelRuns: modelRuns.rows.map((row) => mapModelRunRow(row as Record<string, unknown>)),
       sessionEvents: sessionEvents.rows.map((row) => mapSessionEventRow(row as Record<string, unknown>))
     };

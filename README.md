@@ -1,40 +1,46 @@
 # Voice-to-Text Summarizer
 
-Monorepo scaffold for a web-first voice-to-text summarizer with a desktop companion and a shared bridge contract.
+Local-first voice capture, final transcription, and final summary application.
 
-The repo is now being reshaped into a hosted rebuild. The new foundation adds:
+## Current Direction
 
-- `apps/api` - hosted API scaffold
-- `services/asr-worker` - transcription worker scaffold
-- `services/summary-worker` - summary worker scaffold
-- `packages/shared/src/hosted.ts` - hosted service contracts and environment keys
-- `infra/cloud-run` - baseline Docker/build/deploy notes for the hosted services
-- `apps/web` - dedicated hosted microphone capture flow using `MediaRecorder`
+- web app for recording, status, transcript, summary, and history
+- local API service for session lifecycle and upload handling
+- local `faster-whisper` ASR worker using `large-v3`
+- local summary worker for one final summary plus action items
+- Supabase Postgres for structured session data
+- local filesystem storage for raw chunks and merged audio artifacts
 
-See [docs/hosted-architecture.md](docs/hosted-architecture.md) for the current hosted layout and storage model.
+The current planning source of truth is [.planning/ROADMAP.md](.planning/ROADMAP.md).
 
 ## Structure
 
-- `apps/web` - minimal web app shell
-- `apps/api` - hosted API scaffold
-- `apps/companion` - minimal desktop companion/server shell
-- `services/asr-worker` - hosted transcription worker scaffold
-- `services/summary-worker` - hosted summary worker scaffold
-- `packages/shared` - shared bridge types and contract constants
+- `apps/web` - web client
+- `apps/api` - local API service
+- `apps/companion` - legacy prototype companion
+- `services/asr-worker` - Python ASR worker
+- `services/summary-worker` - summary worker
+- `packages/shared` - shared contracts and constants
 
 ## Stack
 
 - TypeScript
+- Python for the ASR worker
 - npm workspaces
-- Vite for the web shell
-- `tsx` for the companion development server
+- Vite for the web client
+- `faster-whisper` for transcription
 
 ## Getting Started
 
-Hosted rebuild path:
+Install dependencies:
 
 ```bash
 npm install
+```
+
+Run the local API, workers, and web app:
+
+```bash
 npm run dev:hosted
 ```
 
@@ -46,50 +52,36 @@ npm run dev
 
 ## Scripts
 
-- `npm run dev` - runs the legacy web app and companion prototype together
-- `npm run dev:hosted` - runs the hosted API and worker scaffolds together
-- `npm run dev:api` - runs only the hosted API scaffold
-- `npm run dev:asr-worker` - runs only the hosted ASR worker scaffold
-- `npm run dev:summary-worker` - runs only the hosted summary worker scaffold
+- `npm run dev` - runs the legacy prototype app and companion together
+- `npm run dev:hosted` - runs the local API, ASR worker, summary worker, and web app
+- `npm run dev:api` - runs only the API
+- `npm run dev:asr-worker` - runs only the ASR worker
+- `npm run dev:summary-worker` - runs only the summary worker
 - `npm run dev:web` - runs only the web app
-- `npm run dev:companion` - runs only the companion server
+- `npm run dev:companion` - runs only the legacy companion
 - `npm run build` - builds all workspace packages
 - `npm run typecheck` - type-checks all workspace packages
 
-## Legacy Prototype Contract
+## Architecture Reset
 
-The shared package exports the session, transcript, summary, runtime config, and bridge command types that the web app and companion will use as the product grows.
+The active product reset is accuracy-first and post-call:
 
-The companion also exposes an in-memory runtime config endpoint at `/config` so the web UI can display the current local runtime and the English-first defaults.
+1. capture real audio in the browser
+2. store raw chunks on the local filesystem
+3. assemble one merged session artifact after capture ends
+4. run `faster-whisper` with `large-v3` on the merged audio
+5. generate one final summary from the authoritative transcript
+6. review transcript, summary, and action items from Supabase-backed session history
 
-For Phase 2, the companion also serves a simulated transcript stream at `/transcript` so the web UI can poll and render incremental transcript chunks before real speech-to-text is wired in.
+Live notes are legacy scaffolding and are not part of the target MVP.
 
-For Phase 3, the companion adds `/notes` and `/summary` so the web UI can display simulated live notes during a session and a generated final summary after the session stops.
+## Legacy Prototype
 
-Completed sessions are also archived locally under `.voice-to-text-summarizer/sessions.json` so the later history UI can read them back without needing a database yet.
+The repository still includes:
 
-The archive can be read from `/sessions` and `/sessions/:id` when the history screen needs to list or reopen a finished session.
+- a companion app shell
+- simulated transcript and note paths
+- meeting-helper experiments
+- experimental Google Meet scaffolding
 
-For Phase 4, the companion exposes `/meeting-helper` so the web UI can steer a browser meeting or desktop meeting workflow. Google Meet is shown as a fallback path only; the app does not join Meet as a bot or hidden participant.
-
-For Phase 5, the companion also exposes `/experimental/google-meet` behind the `VOICE_TO_TEXT_EXPERIMENTAL_GOOGLE_MEET=1` flag. The web UI renders this as a lab-only control so developers can prototype the integration boundary, status model, and failure handling without affecting the stable meeting-helper flow. This path still does not join Google Meet as a bot or hidden participant.
-
-Developer notes for the experimental boundary live in [docs/experimental-google-meet.md](docs/experimental-google-meet.md).
-
-## Hosted Rebuild
-
-The hosted architecture now treats PostgreSQL and Google Cloud Storage as the durable product storage, with `faster-whisper` and a hosted LLM worker as the production inference path. The current prototype app is still present, but it is no longer the target architecture for Series 1 and beyond.
-
-Series 2 adds the first durable persistence scaffold and documents it in:
-
-- [infra/postgres/001_series2_persistence.sql](infra/postgres/001_series2_persistence.sql)
-- [docs/persistence-model.md](docs/persistence-model.md)
-- [docs/gcs-object-layout.md](docs/gcs-object-layout.md)
-
-Series 3 adds the hosted microphone ingestion path:
-
-- the web app creates hosted sessions on `apps/api`
-- browser `MediaRecorder` chunks are uploaded sequentially with retry
-- chunk payloads go to GCS when `GCS_BUCKET_NAME` is configured
-- the API falls back to a dev-only filesystem mirror when the bucket is absent
-- session stop is handled through the hosted API so the browser can complete cleanly
+Those pieces are useful reference material, but they are not the target product architecture.

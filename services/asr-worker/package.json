@@ -2,14 +2,10 @@
   "name": "@voice/asr-worker",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf dist"
-  },
-  "dependencies": {
-    "@voice/shared": "file:../../packages/shared"
+    "dev": "python3 src/worker.py",
+    "build": "python3 -m py_compile src/worker.py",
+    "typecheck": "python3 -m py_compile src/worker.py",
+    "clean": "find src -name '__pycache__' -type d -prune -exec rm -rf {} +"
   }
 }

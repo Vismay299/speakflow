@@ -148,9 +148,12 @@ code {
   grid-column: 1 / -1;
 }
 
-.notes-card,
 .summary-card {
   grid-column: span 1;
+}
+
+.notes-card {
+  display: none;
 }
 
 .meeting-card {
@@ -252,6 +255,13 @@ code {
   display: grid;
   grid-template-columns: minmax(240px, 0.8fr) minmax(0, 1.2fr);
   gap: 16px;
+  margin-top: 16px;
+}
+
+.history-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
   margin-top: 16px;
 }
 
@@ -373,7 +383,8 @@ code {
 .history-detail-grid span,
 .history-summary p,
 .history-summary li,
-.history-excerpt p {
+.history-excerpt p,
+.history-excerpt li {
   color: var(--muted);
 }
 

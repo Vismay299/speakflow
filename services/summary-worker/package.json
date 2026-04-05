@@ -4,12 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file=../../.env src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@voice/shared": "file:../../packages/shared"
+    "@types/pg": "^8.20.0",
+    "@voice/shared": "file:../../packages/shared",
+    "pg": "^8.20.0"
   }
 }

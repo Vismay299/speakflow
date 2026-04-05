@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Storage } from "@google-cloud/storage";
 import { HOSTED_ENV_KEYS, type HostedChunkStorageMode } from "@voice/shared/hosted";
@@ -12,6 +12,7 @@ export interface StoredHostedAudioChunk {
 export interface HostedAudioChunkStorage {
   getStorageMode(): HostedChunkStorageMode;
   storeAudioChunk(objectPath: string, mimeType: string, bytes: Buffer): Promise<StoredHostedAudioChunk>;
+  deleteAudioChunk(objectPath: string): Promise<void>;
 }
 
 function resolveFilesystemRoot() {
@@ -44,6 +45,11 @@ function createGcsStorage(bucketName: string): HostedAudioChunkStorage {
         storedPath: `gs://${bucketName}/${objectPath}`,
         storedBytes: bytes.byteLength
       };
+    },
+
+    async deleteAudioChunk(objectPath: string) {
+      const file = bucket.file(objectPath);
+      await file.delete({ ignoreNotFound: true });
     }
   };
 }
@@ -65,6 +71,11 @@ function createFilesystemStorage(): HostedAudioChunkStorage {
         storedPath,
         storedBytes: bytes.byteLength
       };
+    },
+
+    async deleteAudioChunk(objectPath: string) {
+      const storedPath = join(rootDir, objectPath);
+      await rm(storedPath, { force: true });
     }
   };
 }

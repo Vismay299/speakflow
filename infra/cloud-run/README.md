@@ -33,14 +33,26 @@ Cloud Run service mapping:
 
 - `voice-asr-worker`
   - `ASR_MODEL_ID`
+  - `ASR_POLL_INTERVAL_MS`
+  - `ASR_CLAIM_TIMEOUT_MS`
+  - `ASR_LANGUAGE`
+  - `ASR_DEVICE`
+  - `ASR_COMPUTE_TYPE`
+  - `ASR_BEAM_SIZE`
+  - `ASR_VAD_FILTER`
   - `PUBSUB_SUBSCRIPTION_ASR`
   - `GCP_PROJECT_ID`
   - `GCP_REGION`
   - `GCS_BUCKET_NAME`
+  - `HOSTED_LOCAL_AUDIO_DIR`
   - `POSTGRES_URL`
 
 - `voice-summary-worker`
   - `SUMMARY_MODEL_ID`
+  - `SUMMARY_POLL_INTERVAL_MS`
+  - `SUMMARY_CLAIM_TIMEOUT_MS`
+  - `SUMMARY_NOTE_WINDOW_SEGMENTS`
+  - `SUMMARY_MAX_TRANSCRIPT_CHARS`
   - `LLM_SERVER_URL`
   - `PUBSUB_SUBSCRIPTION_SUMMARY`
   - `GCP_PROJECT_ID`
@@ -82,10 +94,12 @@ gcloud run deploy voice-summary-worker \
   --region "$GCP_REGION"
 ```
 
-These commands are only a baseline skeleton for Series 1. They intentionally assume:
+These commands are only a baseline skeleton for the hosted rebuild. They intentionally assume:
 
 - an Artifact Registry repository named `voice-to-text`
 - prebuilt and pushed images
 - manual environment variable wiring for now
 
-Real deploy automation, secret wiring, GPU configuration, service accounts, and service-specific runtime settings belong to later implementation steps.
+For Series 4, the ASR worker now runs as a Python `faster-whisper` process that polls Cloud SQL for the next claimable chunk, resolves audio from GCS or the dev filesystem mirror, and writes transcript segments back into Postgres. It also requeues stale `processing` claims after `ASR_CLAIM_TIMEOUT_MS` so a dead worker does not strand audio forever. Pub/Sub remains a later transport optimization, but the first working inference path is the database-backed poller so the end-to-end transcription loop can be validated before transport hardening.
+
+For Series 6, the summary worker now polls Cloud SQL for sessions with new transcript windows, persists live notes plus final summaries/action items, and reclaims stale `running` summary jobs after `SUMMARY_CLAIM_TIMEOUT_MS` so a dead worker does not strand summary generation forever.

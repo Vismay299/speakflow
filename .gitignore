@@ -3,5 +3,11 @@ node_modules
 dist
 .vite
 *.tsbuildinfo
+.env
+.playwright-cli/
+.tmp/
+.claude/
 .voice-to-text-summarizer/
 output/
+__pycache__/
+*.pyc
