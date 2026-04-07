@@ -36,7 +36,7 @@ public enum TranscriptionBridgeError: LocalizedError {
 public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridging, @unchecked Sendable {
     private let pythonExecutable: String
     private let scriptURL: URL
-    private let modelIdentifier = "mlx-community/whisper-large-v3-mlx"
+    private let modelIdentifier = "mlx-community/whisper-large-v3-turbo"
     private let language = "en"
 
     public init(
