@@ -113,6 +113,9 @@ public final class ShellState: ObservableObject {
     @Published public var recentTranscribedUtterances: [TranscribedUtterance] = []
     @Published public var sqliteSnippets: [SnippetRecord] = []
     public var snippetStore: SnippetStore?
+
+    /// Fix #5: Callback set by DictationCoordinator to actually reinsert text.
+    public var onResendSnippet: ((String) -> Void)?
     @Published public var snippetHistory: [SnippetHistoryItem] = [
         SnippetHistoryItem(
             id: UUID(),
@@ -336,6 +339,11 @@ public final class ShellState: ObservableObject {
     public func deleteSnippet(id: UUID) {
         sqliteSnippets.removeAll { $0.id == id }
         try? snippetStore?.delete(id: id)
+    }
+
+    /// Fix #5: Actually reinsert the text via the insertion engine (not just copy).
+    public func resendSnippet(text: String) {
+        onResendSnippet?(text)
     }
 
     public func clearAllSnippets() {
