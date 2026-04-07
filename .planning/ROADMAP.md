@@ -597,6 +597,7 @@ Active line: MVP is functionally complete (Phases 12.1–12.8 + 12.4.1 decision)
 - 2026-04-06: Phase 12.7 is complete with terminal-safe text insertion via AX cursor placement and clipboard paste fallback, terminal sanitization (strips newlines and ANSI escapes), os.log diagnostic logging, and all 10 review items addressed.
 - 2026-04-06: Phase 12.8 is complete with SQLite-backed snippet history (`SnippetStore` with persistent connection, thread-safe serial queue), per-snippet insertion tracking (target app, success/failure), Copy/Resend/Delete UI actions, and 18 test assertions.
 - 2026-04-06: Phase 12.4.1 benchmark decision: `mlx-whisper` on GPU is locked as the `large-v3` ASR runtime. It wins over `faster-whisper` on CPU across all metrics: 102s vs 105s total, 84.2% vs 82.8% confidence, and leaves the CPU free for app/UI work. The `mlx-community/whisper-large-v3-mlx` model is the target. The turbo variant (`large-v3-turbo`) at 2.6s on mlx remains a future escape hatch if latency becomes a concern.
+- 2026-04-06: ASR runtime switched to `mlx-community/whisper-large-v3-turbo`. Turbo is 2.6s vs 102s for full large-v3 (~40x faster) with essentially identical confidence (84.1% vs 84.2%). The original accuracy-first decision for `large-v3` is overridden because turbo delivers the same accuracy at a usable latency.
 
 ## Session Restart Notes
 

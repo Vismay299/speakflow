@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe one utterance with mlx-whisper large-v3.")
     parser.add_argument("--input", required=True, help="Path to the WAV file to transcribe.")
     parser.add_argument("--utterance-id", required=True, help="Utterance UUID for tracing.")
-    parser.add_argument("--model", default="mlx-community/whisper-large-v3-mlx", help="HuggingFace model repo.")
+    parser.add_argument("--model", default="mlx-community/whisper-large-v3-turbo", help="HuggingFace model repo.")
     parser.add_argument("--language", default="en", help="Language code.")
     return parser.parse_args()
 
