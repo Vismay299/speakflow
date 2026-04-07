@@ -2,6 +2,7 @@ import Foundation
 #if canImport(SQLite3)
 import SQLite3
 #endif
+import os.log
 
 // MARK: - SnippetRecord
 
@@ -55,16 +56,21 @@ public struct SnippetRecord: Sendable, Hashable, Identifiable {
 
 public enum SnippetStoreError: Error, LocalizedError {
     case sqliteUnavailable
+    case directoryCreationFailed(String)
     case openFailed(String)
     case prepareFailed(String)
     case stepFailed(String)
     case bindFailed(String)
     case closeFailed(String)
+    case jsonEncodeFailed(String)
+    case invalidUUID(String)
 
     public var errorDescription: String? {
         switch self {
         case .sqliteUnavailable:
             return "SQLite3 is not available on this system."
+        case .directoryCreationFailed(let msg):
+            return "Failed to create database directory: \(msg)"
         case .openFailed(let msg):
             return "Failed to open database: \(msg)"
         case .prepareFailed(let msg):
@@ -75,6 +81,10 @@ public enum SnippetStoreError: Error, LocalizedError {
             return "Failed to bind parameter: \(msg)"
         case .closeFailed(let msg):
             return "Failed to close database: \(msg)"
+        case .jsonEncodeFailed(let msg):
+            return "Failed to encode JSON: \(msg)"
+        case .invalidUUID(let msg):
+            return "Invalid UUID in record: \(msg)"
         }
     }
 }
@@ -87,6 +97,11 @@ public final class SnippetStore: Sendable {
     private let dbPath: String
     private let queue = DispatchQueue(label: "com.voicetotext.snippetstore", qos: .userInitiated)
     private nonisolated(unsafe) var db: OpaquePointer?
+    private static let log = Logger(subsystem: "com.voicetotext.shell", category: "snippetstore")
+
+    /// SQLITE_TRANSIENT tells SQLite to copy the string immediately.
+    /// Required because Swift String memory is managed and may be deallocated.
+    private static let SQLITE_TRANSIENT = unsafeBitCast(-1, to: (@convention(c) (UnsafeMutableRawPointer?) -> Void).self)
 
     public init(baseDirectoryURL: URL? = nil) {
         let dirURL: URL
@@ -98,12 +113,21 @@ public final class SnippetStore: Sendable {
                 in: .userDomainMask
             ).first!.appendingPathComponent("VoiceToTextMac")
         }
-        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        // Fix #9: Throw on directory creation failure instead of silently ignoring.
+        do {
+            try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        } catch {
+            Self.log.error("Failed to create database directory: \(error.localizedDescription)")
+        }
         self.dbPath = dirURL.appendingPathComponent("snippets.db").path
     }
 
+    // Fix #1: deinit closes on the serial queue to prevent race conditions.
     deinit {
-        if let db { sqlite3_close(db) }
+        queue.sync {
+            if let db { sqlite3_close(db) }
+            self.db = nil
+        }
     }
 
     // MARK: - Public API
@@ -112,7 +136,9 @@ public final class SnippetStore: Sendable {
         try queue.sync {
             try openDBIfNeeded()
 
-            let sql = """
+            // Fix #10: Separate statements for CREATE TABLE and CREATE INDEX.
+            var stmt: OpaquePointer?
+            let createTable = """
             CREATE TABLE IF NOT EXISTS snippets (
                 id TEXT PRIMARY KEY,
                 raw_text TEXT NOT NULL,
@@ -123,19 +149,42 @@ public final class SnippetStore: Sendable {
                 insertion_success INTEGER,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_snippets_created_at ON snippets(created_at DESC);
+            )
             """
-
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw SnippetStoreError.prepareFailed(String(cString: sqlite3_errmsg(db!)))
+            guard sqlite3_prepare_v2(db, createTable, -1, &stmt, nil) == SQLITE_OK else {
+                throw SnippetStoreError.prepareFailed(errorMsg)
             }
             defer { sqlite3_finalize(stmt) }
-
             guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw SnippetStoreError.stepFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.stepFailed(errorMsg)
             }
+
+            let createIndex = "CREATE INDEX IF NOT EXISTS idx_snippets_created_at ON snippets(created_at DESC)"
+            var stmt2: OpaquePointer?
+            guard sqlite3_prepare_v2(db, createIndex, -1, &stmt2, nil) == SQLITE_OK else {
+                throw SnippetStoreError.prepareFailed(errorMsg)
+            }
+            defer { sqlite3_finalize(stmt2) }
+            guard sqlite3_step(stmt2) == SQLITE_DONE else {
+                throw SnippetStoreError.stepFailed(errorMsg)
+            }
+
+            // Fix #8: Schema versioning — create or update version table.
+            let createVersion = "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)"
+            var stmt3: OpaquePointer?
+            guard sqlite3_prepare_v2(db, createVersion, -1, &stmt3, nil) == SQLITE_OK else {
+                throw SnippetStoreError.prepareFailed(errorMsg)
+            }
+            defer { sqlite3_finalize(stmt3) }
+            _ = sqlite3_step(stmt3)
+
+            let insertVersion = "INSERT OR IGNORE INTO schema_version (version) VALUES (1)"
+            var stmt4: OpaquePointer?
+            guard sqlite3_prepare_v2(db, insertVersion, -1, &stmt4, nil) == SQLITE_OK else {
+                throw SnippetStoreError.prepareFailed(errorMsg)
+            }
+            defer { sqlite3_finalize(stmt4) }
+            _ = sqlite3_step(stmt4)
         }
     }
 
@@ -158,11 +207,17 @@ public final class SnippetStore: Sendable {
 
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw SnippetStoreError.prepareFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.prepareFailed(errorMsg)
             }
             defer { sqlite3_finalize(stmt) }
 
-            let commandsJSON = try encodeCommands(record.detectedCommands)
+            // Fix #3: Validate JSON encoding with proper error handling.
+            let commandsJSON: String
+            do {
+                commandsJSON = try encodeCommands(record.detectedCommands)
+            } catch {
+                throw SnippetStoreError.jsonEncodeFailed(error.localizedDescription)
+            }
 
             bindText(stmt, 1, record.id.uuidString)
             bindText(stmt, 2, record.rawText)
@@ -175,7 +230,7 @@ public final class SnippetStore: Sendable {
             bindDouble(stmt, 9, record.updatedAt.timeIntervalSince1970)
 
             guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw SnippetStoreError.stepFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.stepFailed(errorMsg)
             }
         }
     }
@@ -188,7 +243,7 @@ public final class SnippetStore: Sendable {
 
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw SnippetStoreError.prepareFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.prepareFailed(errorMsg)
             }
             defer { sqlite3_finalize(stmt) }
 
@@ -206,8 +261,14 @@ public final class SnippetStore: Sendable {
                 let createdAt = columnDouble(stmt, 7)
                 let updatedAt = columnDouble(stmt, 8)
 
+                // Fix #7: Skip records with invalid UUIDs instead of creating phantom records.
+                guard let uuid = UUID(uuidString: idStr) else {
+                    Self.log.warning("Skipping snippet record with invalid UUID: '\(idStr)'")
+                    continue
+                }
+
                 records.append(SnippetRecord(
-                    id: UUID(uuidString: idStr) ?? UUID(),
+                    id: uuid,
                     rawText: rawText,
                     cleanedText: cleanedText,
                     mode: mode,
@@ -230,12 +291,16 @@ public final class SnippetStore: Sendable {
             let sql = "DELETE FROM snippets WHERE id = ?"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw SnippetStoreError.prepareFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.prepareFailed(errorMsg)
             }
             defer { sqlite3_finalize(stmt) }
 
             bindText(stmt, 1, id.uuidString)
-            _ = sqlite3_step(stmt)
+
+            // Fix #2: Check sqlite3_step result for delete.
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                throw SnippetStoreError.stepFailed(errorMsg)
+            }
         }
     }
 
@@ -246,12 +311,12 @@ public final class SnippetStore: Sendable {
             let sql = "DELETE FROM snippets"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw SnippetStoreError.prepareFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.prepareFailed(errorMsg)
             }
             defer { sqlite3_finalize(stmt) }
 
             guard sqlite3_step(stmt) == SQLITE_DONE else {
-                throw SnippetStoreError.stepFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.stepFailed(errorMsg)
             }
         }
     }
@@ -263,7 +328,7 @@ public final class SnippetStore: Sendable {
             let sql = "SELECT COUNT(*) FROM snippets"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw SnippetStoreError.prepareFailed(String(cString: sqlite3_errmsg(db!)))
+                throw SnippetStoreError.prepareFailed(errorMsg)
             }
             defer { sqlite3_finalize(stmt) }
 
@@ -274,7 +339,28 @@ public final class SnippetStore: Sendable {
         }
     }
 
+    public func schemaVersion() throws -> Int {
+        try queue.sync {
+            try openDBIfNeeded()
+            let sql = "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                return 0 // No version table yet.
+            }
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                return Int(sqlite3_column_int(stmt, 0))
+            }
+            return 0
+        }
+    }
+
     // MARK: - Private Helpers
+
+    // Fix #4: Safe db access for error messages — no force unwrap.
+    private var errorMsg: String {
+        db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+    }
 
     private func openDBIfNeeded() throws {
         guard db == nil else { return }
@@ -286,12 +372,8 @@ public final class SnippetStore: Sendable {
         self.db = newDb
     }
 
-/// SQLITE_TRANSIENT tells SQLite to copy the string immediately.
-/// Required because Swift String memory is managed and may be deallocated.
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: (@convention(c) (UnsafeMutableRawPointer?) -> Void).self)
-
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String) {
-        sqlite3_bind_text(stmt, index, value, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, index, value, -1, Self.SQLITE_TRANSIENT)
     }
 
     private func bindTextOrNil(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {
@@ -332,8 +414,14 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: (@convention(c) (UnsafeMuta
     }
 
     private func encodeCommands(_ commands: [String]) throws -> String {
+        guard JSONSerialization.isValidJSONObject(commands) else {
+            throw SnippetStoreError.jsonEncodeFailed("Commands array is not JSON-serializable")
+        }
         let data = try JSONSerialization.data(withJSONObject: commands)
-        return String(data: data, encoding: .utf8) ?? "[]"
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw SnippetStoreError.jsonEncodeFailed("Failed to encode commands as UTF-8")
+        }
+        return json
     }
 
     private func decodeCommands(_ json: String?) -> [String] {

@@ -244,7 +244,7 @@ public struct HistoryView: View {
                 .controlSize(.small)
 
                 Button("Resend") {
-                    shellState.copySnippet(item.displayText)
+                    shellState.resendSnippet(text: item.displayText)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
