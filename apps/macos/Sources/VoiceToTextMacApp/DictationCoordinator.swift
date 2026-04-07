@@ -1,9 +1,11 @@
 import Combine
 import Foundation
+import os.log
 import VoiceToTextMac
 
 @MainActor
 final class DictationCoordinator {
+    private static let log = Logger(subsystem: "com.voicetotext.shell", category: "coordinator")
     private let shellState: ShellState
     private let permissionsManager: PermissionsManager
     private let hotkeyMonitor: HotkeyMonitor
@@ -52,6 +54,20 @@ final class DictationCoordinator {
         // Bootstrap snippet store and load snippets.
         try? snippetStore.bootstrap()
         shellState.snippetStore = snippetStore
+
+        // Fix #5: Wire resend callback so the UI actually reinserts text.
+        shellState.onResendSnippet = { [weak self] text in
+            guard let self else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.shellState.refreshInsertionState(.detectingTarget)
+                let result = await self.insertionEngine.insertText(text)
+                self.shellState.refreshInsertionState(
+                    result.success ? .inserted(result) : .failed(result.errorMessage ?? "Resend failed")
+                )
+            }
+        }
+
         loadSnippets()
 
         syncShellState()
@@ -169,7 +185,11 @@ final class DictationCoordinator {
             createdAt: transcription.capturedAt,
             updatedAt: Date()
         )
-        try? snippetStore.insert(record)
+        do {
+            try snippetStore.insert(record)
+        } catch {
+            Self.log.error("Failed to save snippet: \(error.localizedDescription)")
+        }
         loadSnippets()
     }
 
