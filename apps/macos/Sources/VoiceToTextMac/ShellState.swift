@@ -1,8 +1,12 @@
 import Foundation
+import os.log
+import ServiceManagement
 import SwiftUI
 
 private let kSelectedMode = "com.voicetotext.shell.selectedMode"
 private let kAutoInsertEnabled = "com.voicetotext.shell.autoInsertEnabled"
+private let kHasCompletedOnboarding = "com.voicetotext.shell.hasCompletedOnboarding"
+private let kLaunchAtLoginEnabled = "com.voicetotext.shell.launchAtLogin"
 
 public struct SnippetHistoryItem: Identifiable, Hashable {
     public let id: UUID
@@ -77,6 +81,8 @@ public enum ShellStatus: String {
 
 @MainActor
 public final class ShellState: ObservableObject {
+    private static let log = Logger(subsystem: "com.voicetotext.shell", category: "shellstate")
+
     @Published public var selectedMode: DictationMode {
         didSet {
             UserDefaults.standard.setValue(selectedMode.rawValue, forKey: kSelectedMode)
@@ -89,9 +95,28 @@ public final class ShellState: ObservableObject {
         }
     }
 
+    /// Series 12: Whether the user has completed the first-launch onboarding.
+    @Published public var hasCompletedOnboarding: Bool {
+        didSet {
+            UserDefaults.standard.setValue(hasCompletedOnboarding, forKey: kHasCompletedOnboarding)
+        }
+    }
+
+    /// Series 12: Whether to show the onboarding flow on first launch.
+    public var shouldShowOnboarding: Bool {
+        !hasCompletedOnboarding
+    }
+
+    /// Series 12: Launch-at-login toggle, persisted to UserDefaults.
+    @Published public var launchAtLoginEnabled: Bool {
+        didSet {
+            UserDefaults.standard.setValue(launchAtLoginEnabled, forKey: kLaunchAtLoginEnabled)
+            applyLaunchAtLogin(launchAtLoginEnabled)
+        }
+    }
+
     private let transcriptCleaner = TranscriptCleaner()
     @Published public var shellStatus: ShellStatus = .setupRequired
-    @Published public var launchAtLoginEnabled = false
     @Published public var showOverlay = true
     @Published public var microphoneStatusText = "Microphone: not checked"
     @Published public var accessibilityStatusText = "Accessibility: not checked"
@@ -139,6 +164,8 @@ public final class ShellState: ObservableObject {
             self.selectedMode = .terminal
         }
         self.autoInsertEnabled = UserDefaults.standard.object(forKey: kAutoInsertEnabled) as? Bool ?? true
+        self.hasCompletedOnboarding = UserDefaults.standard.bool(forKey: kHasCompletedOnboarding)
+        self.launchAtLoginEnabled = UserDefaults.standard.bool(forKey: kLaunchAtLoginEnabled)
     }
 
     /// Update the active dictation mode. If `rebuildSnippets` is true,
@@ -349,5 +376,45 @@ public final class ShellState: ObservableObject {
     public func clearAllSnippets() {
         sqliteSnippets = []
         try? snippetStore?.clearAll()
+    }
+
+    // MARK: - Series 12: Onboarding & Launch-at-Login
+
+    /// Series 12: Auto-prompt for permissions on first launch.
+    /// Called by DictationCoordinator during bootstrap to guide the user
+    /// through the initial permission setup without requiring manual button clicks.
+    public func requestPermissionsOnboarding(permissionsManager: PermissionsManager) {
+        guard shouldShowOnboarding else { return }
+
+        // Request microphone first — this is the most critical permission.
+        Task {
+            await permissionsManager.requestMicrophoneAccess()
+            // After mic response, request accessibility.
+            permissionsManager.requestAccessibilityAccess()
+            // Mark onboarding as complete after both prompts.
+            hasCompletedOnboarding = true
+        }
+    }
+
+    /// Mark onboarding as complete (called when user dismisses or completes setup).
+    public func markOnboardingComplete() {
+        hasCompletedOnboarding = true
+    }
+
+    /// Series 12: Apply launch-at-login setting using ServiceManagement.
+    /// On macOS 13+, uses SMAppService for modern login item registration.
+    private func applyLaunchAtLogin(_ enabled: Bool) {
+        if #available(macOS 13.0, *) {
+            do {
+                let appService = SMAppService.mainApp
+                if enabled {
+                    try appService.register()
+                } else {
+                    try appService.unregister()
+                }
+            } catch {
+                Self.log.warning("Launch at login \(enabled ? "enable" : "disable") failed: \(error.localizedDescription)")
+            }
+        }
     }
 }
