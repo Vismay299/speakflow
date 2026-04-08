@@ -28,7 +28,7 @@ public enum KnownAppType: String, Codable, Sendable, Hashable {
     case browser
     /// Plain text editors (TextEdit, Notes, Xcode) — AX works well.
     case plainTextEditor
-    /// Rich editors (Google Docs, Notion, VS Code) — AX may be unreliable,
+    /// Rich editors (Notion, VS Code, JetBrains) — AX may be unreliable,
     /// paste is the safest fallback.
     case richEditor
     /// Unknown app — try AX, fall back to paste.
@@ -38,13 +38,14 @@ public enum KnownAppType: String, Codable, Sendable, Hashable {
     /// the insertion strategy before AX detection runs.
     static func classify(bundleId: String) -> KnownAppType {
         switch bundleId {
-        // Terminals (Series 9)
+        // Terminals (Series 9 + 11)
         case "com.apple.Terminal",
              "com.googlecode.iterm2",
              "com.googlecode.iterm2-beta",
              "dev.warp.Warp-Stable",
              "net.kovidgoyal.kitty",
-             "org.alacritty":
+             "org.alacritty",
+             "com.mitchellh.ghostty":
             return .terminal
 
         // Browsers (Series 11)
@@ -57,23 +58,21 @@ public enum KnownAppType: String, Codable, Sendable, Hashable {
              "com.apple.Safari",
              "com.apple.SafariTechnologyPreview",
              "com.microsoft.edgemac",
-             "com.brave.Browser",
-             "com.mitchellh.ghostty":
+             "com.brave.Browser":
             return .browser
 
         // Rich editors (Series 11) — AX is unreliable, prefer paste
-        case "com.google.GoogleDrive",              // Google Docs via Drive
-             "com.notion.id",
+        case "com.notion.id",
              "com.microsoft.VSCode",
              "com.microsoft.VSCodeInsiders",
              "com.jetbrains.intellij",
-             "com.jetbrains.pycharm",
-             "com.apple.dt.Xcode":                  // Xcode has AX but paste is safer
+             "com.jetbrains.pycharm":
             return .richEditor
 
         // Plain text editors — AX works well
         case "com.apple.TextEdit",
              "com.apple.Notes",
+             "com.apple.dt.Xcode",
              "com.sublimetext.4",
              "com.sublimetext.3",
              "com.macromates.TextMate.preview",
@@ -100,21 +99,6 @@ public enum KnownAppType: String, Codable, Sendable, Hashable {
         }
     }
 
-    /// User-facing support level for this app type.
-    var supportLevel: String {
-        switch self {
-        case .terminal:
-            return "Full — bracketed paste, multiline safe"
-        case .browser:
-            return "Good — clipboard paste into textareas"
-        case .plainTextEditor:
-            return "Full — AX cursor placement + paste fallback"
-        case .richEditor:
-            return "Partial — clipboard paste (AX unreliable)"
-        case .unknown:
-            return "Best effort — AX then paste fallback"
-        }
-    }
 }
 
 // MARK: - TerminalAppMode
@@ -134,7 +118,8 @@ enum TerminalAppMode {
         case "com.googlecode.iterm2",
              "com.googlecode.iterm2-beta",
              "dev.warp.Warp-Stable",
-             "net.kovidgoyal.kitty":
+             "net.kovidgoyal.kitty",
+             "com.mitchellh.ghostty":
             return .bracketedPaste
         case "com.apple.Terminal",
              "org.alacritty":
@@ -201,8 +186,12 @@ public enum InsertionState: Equatable, Sendable {
 /// Inserts dictated text into the currently focused app at the current cursor
 /// position. Never simulates pressing Enter or auto-submits the text.
 ///
-/// Primary strategy: Accessibility-focused text field at the cursor position.
-/// Fallback: Clipboard paste (Cmd+V simulation) for terminals.
+/// Series 11 — Editor Compatibility:
+/// - Classifies apps via KnownAppType (terminal/browser/richEditor/plainTextEditor)
+/// - Terminals: bracketed/plain paste with newline safety (Phase 12.9)
+/// - Browsers + rich editors: clipboard paste (AX unreliable for Shadow DOM / Electron)
+/// - Plain text editors: AX cursor placement with paste fallback
+/// - Insertion failure is surfaced to the user, never silent
 @MainActor
 public final class TextInsertionEngine: ObservableObject, Sendable {
     @Published public private(set) var state: InsertionState = .idle
@@ -241,6 +230,7 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
                 insertedTextPreview: ""
             )
             state = .failed(result.errorMessage!)
+            onInsertionFailure?(result.errorMessage!)
             return result
         }
 
@@ -256,6 +246,7 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
                 insertedTextPreview: textPreview(text)
             )
             state = .failed(result.errorMessage!)
+            onInsertionFailure?(result.errorMessage!)
             return result
         }
 
@@ -506,9 +497,21 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
         pasteboard.setString(UUID().uuidString, forType: markerType)
 
         // Activate the target app FIRST, then send Cmd+V.
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: appBundleId).first {
-            app.activate(options: .activateIgnoringOtherApps)
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: appBundleId).first else {
+            let result = InsertionResult(
+                success: false,
+                strategy: .pasteViaClipboard,
+                targetAppBundleId: appBundleId,
+                targetAppName: appName,
+                errorMessage: "Could not activate target application.",
+                insertedTextPreview: textPreview(text)
+            )
+            state = .failed(result.errorMessage!)
+            onInsertionFailure?(result.errorMessage!)
+            return result
         }
+
+        app.activate(options: .activateIgnoringOtherApps)
 
         try? await Task.sleep(nanoseconds: Self.appActivationDelayNanoseconds)
 
