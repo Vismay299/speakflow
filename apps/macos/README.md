@@ -12,11 +12,12 @@ Native macOS shell scaffold for the local dictation app.
 - Right Option push-to-talk hotkey monitoring scaffold
 - local utterance capture into deterministic Application Support storage
 - local `faster-whisper + large-v3` utterance transcription
+- live terminal insertion while recording, including replacement of the current dictated fragment as partial transcripts improve
 - locally persisted transcript JSON artifacts
 
 This package does not yet implement:
 
-- focused-app text insertion
+- reliable live rewriting of already-inserted terminal text when the model revises earlier words
 
 The always-pass self-test runner checks pure helpers, queueing behavior, and local transcript persistence. Live smoke checks stay opt-in and must never block the default test path.
 
