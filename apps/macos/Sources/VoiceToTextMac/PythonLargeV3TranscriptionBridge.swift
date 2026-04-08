@@ -216,16 +216,18 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
         }
         requestLine += "\n"
 
-        // Send request to worker stdin.
+        // Send request to worker stdin (hold lock to prevent interleaved writes).
         lock.lock()
         let stdin = workerStdin
+        let lineData = requestLine.data(using: .utf8)
+        if let stdin, let lineData {
+            stdin.write(lineData)
+        }
         lock.unlock()
 
-        guard let stdin, let lineData = requestLine.data(using: .utf8) else {
+        guard stdin != nil, lineData != nil else {
             throw TranscriptionBridgeError.workerCrashed("Worker stdin unavailable")
         }
-
-        stdin.write(lineData)
 
         // Read response line from worker stdout.
         let responseLine = try await readLine()
@@ -238,6 +240,15 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
         if let errorJSON = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
            let errorMsg = errorJSON["error"] as? String {
             throw TranscriptionBridgeError.workerCrashed(errorMsg)
+        }
+
+        // Validate response utterance_id matches request.
+        if let responseJSON = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+           let responseID = responseJSON["utterance_id"] as? String,
+           responseID != artifact.id.uuidString {
+            throw TranscriptionBridgeError.invalidResponse(
+                "Response ID mismatch: expected \(artifact.id.uuidString), got \(responseID)"
+            )
         }
 
         return try decode(responseData)
@@ -266,11 +277,20 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
 
                 // Read byte-by-byte until newline. This is simple and correct
                 // for line-delimited JSON where each response is one line.
+                let maxLineLength = 10_000_000 // 10 MB safety limit
                 var buffer = Data()
                 while true {
                     let byte = stdout.readData(ofLength: 1)
                     if byte.isEmpty {
-                        // EOF — worker exited.
+                        // EOF — worker exited. Mark as not ready so subsequent
+                        // calls to transcribe() will attempt a restart.
+                        self.lock.lock()
+                        self.isReady = false
+                        self.workerProcess = nil
+                        self.workerStdin = nil
+                        self.workerStdout = nil
+                        self.lock.unlock()
+
                         let stderr = self.collectStderr()
                         continuation.resume(throwing: TranscriptionBridgeError.workerCrashed(
                             "Worker exited unexpectedly. Stderr: \(stderr)"
@@ -281,6 +301,12 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
                         break
                     }
                     buffer.append(byte)
+                    if buffer.count > maxLineLength {
+                        continuation.resume(throwing: TranscriptionBridgeError.invalidResponse(
+                            "Response line exceeded \(maxLineLength) bytes"
+                        ))
+                        return
+                    }
                 }
 
                 let line = String(decoding: buffer, as: UTF8.self)
