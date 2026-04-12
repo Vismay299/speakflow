@@ -1,113 +1,150 @@
-# Voice-to-Text Summarizer
+# VoiceToText
 
-Local-first voice tooling, now pivoting toward a native macOS dictation app for anywhere you type.
+**Push-to-talk dictation for your Mac. Fully local. No cloud. No subscription.**
 
-## Current Direction
+Hold a hotkey, speak, release — your words appear wherever your cursor is. Terminal, browser, editor, chat app. Nothing leaves your machine.
 
-- native macOS menu bar app in Swift/SwiftUI for push-to-talk dictation
-- local `faster-whisper` ASR worker using `large-v3`
-- terminal-safe insertion into the focused app without auto-submitting
-- deterministic voice commands for formatting
-- local SQLite snippet history
-- local filesystem storage for utterance artifacts
+---
 
-The current planning source of truth is [.planning/ROADMAP.md](.planning/ROADMAP.md).
+## Download
 
-## Structure
+**[Download VoiceToText-0.1.0.dmg](https://github.com/Vismay299/voice-to-text-summarizer/releases/latest)**
 
-- `apps/macos` - native Swift/SwiftUI macOS shell scaffold
-- `apps/web` - legacy web client and useful debug shell
-- `apps/api` - local API service
-- `apps/companion` - legacy prototype companion
-- `services/asr-worker` - Python ASR worker
-- `services/summary-worker` - summary worker
-- `packages/shared` - shared contracts and constants
+> Requires macOS 13+ and Apple Silicon (M1 or later).
 
-## Stack
+---
 
-- Swift + SwiftUI for the native shell
-- TypeScript for the existing local services and web tooling
-- Python for the ASR worker
-- npm workspaces
-- Vite for the legacy web client
-- `faster-whisper` for transcription
+## What it does
 
-## Getting Started
+- **Hold Right Option** anywhere on your Mac to start recording
+- **Release** to transcribe and insert text at your cursor
+- Works in Terminal, iTerm2, Warp, Chrome, Safari, Notion, VS Code, Claude.ai — anywhere you can type
+- **Never presses Enter** — you review before submitting
+- Two modes: **Terminal** (safe for CLI prompts) and **Writing** (cleans up prose)
+- Local snippet history — copy, resend, or review past dictations
+- Runs entirely on your machine using Apple Silicon GPU
 
-Install dependencies:
+---
 
-```bash
-npm install
-python3 -m pip install -r services/asr-worker/requirements.txt
+## How it works
+
+```
+Hold hotkey → record → release → transcribe locally → insert at cursor
 ```
 
-Run the native macOS shell:
+Transcription runs on-device using [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) with `whisper-large-v3-turbo` on your Apple Silicon GPU. No API keys. No internet required. Audio never leaves your Mac.
+
+---
+
+## Install
+
+### Step 1 — Install the Python transcription engine
 
 ```bash
+pip install mlx-whisper
+```
+
+> First launch downloads the ~800MB `large-v3-turbo` model weights from HuggingFace and caches them locally. Subsequent launches are instant.
+
+### Step 2 — Download and open the app
+
+1. Download **VoiceToText-0.1.0.dmg** from [Releases](https://github.com/Vismay299/voice-to-text-summarizer/releases/latest)
+2. Open the DMG and drag **VoiceToText** to your Applications folder
+3. **Right-click → Open** on first launch (required for unsigned apps — Apple charges $99/year for notarization, we skip that)
+4. Click **Open** when macOS asks for confirmation
+
+### Step 3 — Grant permissions
+
+The app will prompt you for:
+- **Microphone** — to capture your voice
+- **Accessibility** — to insert text into other apps
+
+Both are required. Both stay local.
+
+---
+
+## Usage
+
+| Action | What happens |
+|---|---|
+| Hold **Right Option** | Recording starts |
+| Release **Right Option** | Transcribes and inserts at cursor |
+| Click **Terminal** / **Writing** | Switch cleanup mode |
+| Click **Open History** | Browse past dictations |
+
+### Modes
+
+**Terminal mode** — minimal cleanup, safe for AI CLI tools and terminal prompts. Preserves your exact words, strips leading filler words only.
+
+**Writing mode** — cleans up prose. Removes filler words (um, uh, like, basically), fixes capitalization, normalizes punctuation.
+
+### Voice commands
+
+Speak these anywhere and they get converted:
+
+| Say | Inserts |
+|---|---|
+| "new line" | `\n` |
+| "slash command" | `/` |
+| "open quote" | `"` |
+| "code block" | ` ``` ` |
+
+---
+
+## Requirements
+
+- macOS 13 Ventura or later
+- Apple Silicon Mac (M1, M2, M3, M4)
+- Python 3.10+ with `mlx-whisper` installed
+
+---
+
+## Build from source
+
+```bash
+# Clone
+git clone https://github.com/Vismay299/voice-to-text-summarizer.git
+cd voice-to-text-summarizer
+
+# Install Python dependency
+pip install mlx-whisper
+
+# Run directly
 npm run dev:macos
+
+# Or build a .dmg
+npm run build:dmg
+# → dist/VoiceToText-0.1.0.dmg
 ```
 
-Build the native macOS shell:
+**Requirements for building:** Swift 6.2+, Xcode Command Line Tools, Node.js 18+
 
-```bash
-npm run build:macos
-```
+---
 
-Run the native shell self-tests:
+## Privacy
 
-```bash
-npm run test:macos
-```
+- All audio is processed locally on your Mac
+- Transcripts are stored in `~/Library/Application Support/VoiceToTextMac/`
+- No telemetry, no analytics, no network requests
+- You can delete all data by removing that folder
 
-The native self-test runner is intentionally pure-first. Live capture and real `large-v3` transcription smoke checks stay opt-in and never become part of the always-pass path.
+---
 
-Legacy local API, workers, and web app:
+## Supported apps
 
-```bash
-npm run dev:hosted
-```
+| App | Works |
+|---|---|
+| Terminal, iTerm2, Warp, Ghostty, Kitty | Yes |
+| Chrome, Firefox, Safari, Edge, Brave | Yes |
+| Notion (desktop) | Yes |
+| VS Code, JetBrains | Yes |
+| TextEdit, Notes, Xcode | Yes |
+| Claude.ai, ChatGPT (browser) | Yes |
 
-Legacy prototype path:
+---
 
-```bash
-npm run dev
-```
+## Contributing
 
-## Scripts
+This is an open-source project. Issues and PRs welcome.
 
-- `npm run dev:macos` - runs the native Swift/SwiftUI menu bar shell
-- `npm run build:macos` - builds the native Swift package
-- `npm run test:macos` - runs the native shell self-test harness
-- `npm run dev` - runs the legacy prototype app and companion together
-- `npm run dev:hosted` - runs the local API, ASR worker, summary worker, and web app
-- `npm run dev:api` - runs only the API
-- `npm run dev:asr-worker` - runs only the ASR worker
-- `npm run dev:summary-worker` - runs only the summary worker
-- `npm run dev:web` - runs only the web app
-- `npm run dev:companion` - runs only the legacy companion
-- `npm run build` - builds all workspace packages
-- `npm run typecheck` - type-checks all workspace packages
-
-## Architecture Reset
-
-The active product reset is a local macOS dictation app:
-
-1. run a native menu bar app that stays available from anywhere
-2. capture one utterance per push-to-talk cycle and save it locally
-3. transcribe locally with `faster-whisper + large-v3`
-4. clean the transcript for `Terminal` or `Writing` mode
-5. apply deterministic spoken formatting commands
-6. insert the final text at the focused cursor without pressing Enter
-7. keep local snippet history for copy and resend
-
-The current native shell now covers Phase 12.1, 12.2, 12.3, and 12.4. It gives us:
-
-- a real menu bar app entry point
-- permissions and hotkey gating
-- utterance-based local WAV artifact creation
-- one saved local transcript per captured utterance through the bundled Python `large-v3` bridge
-- a settings window
-- a local history surface for capture artifacts and transcript results
-- a clear place to add cleanup modes and insertion next
-
-The previous web/session-summary architecture remains in the repo as legacy material and reusable infrastructure, but it is no longer the defining MVP product shape.
+The planning docs live in `.planning/ROADMAP.md` — read that before contributing.
