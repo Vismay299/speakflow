@@ -32,7 +32,7 @@ Transcription runs on-device using [mlx-whisper](https://github.com/ml-explore/m
 ## Install
 
 ```bash
-pip install mlx-whisper
+pip3 install mlx-whisper
 brew install --cask vismay299/speakflow/speakflow
 ```
 
@@ -88,7 +88,7 @@ git clone https://github.com/Vismay299/speakflow.git
 cd voice-to-text-summarizer
 
 # Install Python dependency
-pip install mlx-whisper
+pip3 install mlx-whisper
 
 # Run directly
 npm run dev:macos
