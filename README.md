@@ -8,7 +8,7 @@ Hold a hotkey, speak, release — your words appear wherever your cursor is. Ter
 
 ## Download
 
-**[Download SpeakFlow-0.1.0.dmg](https://github.com/Vismay299/voice-to-text-summarizer/releases/latest)**
+**[Download SpeakFlow-0.1.0.dmg](https://github.com/Vismay299/speakflow/releases/latest)**
 
 > Requires macOS 13+ and Apple Silicon (M1 or later).
 
@@ -48,7 +48,7 @@ pip install mlx-whisper
 
 ### Step 2 — Download and open the app
 
-1. Download **SpeakFlow-0.1.0.dmg** from [Releases](https://github.com/Vismay299/voice-to-text-summarizer/releases/latest)
+1. Download **SpeakFlow-0.1.0.dmg** from [Releases](https://github.com/Vismay299/speakflow/releases/latest)
 2. Open the DMG and drag **SpeakFlow** to your Applications folder
 3. **Right-click → Open** on first launch (required for unsigned apps — Apple charges $99/year for notarization, we skip that)
 4. Click **Open** when macOS asks for confirmation
@@ -103,7 +103,7 @@ Speak these anywhere and they get converted:
 
 ```bash
 # Clone
-git clone https://github.com/Vismay299/voice-to-text-summarizer.git
+git clone https://github.com/Vismay299/speakflow.git
 cd voice-to-text-summarizer
 
 # Install Python dependency
