@@ -112,8 +112,10 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
             "--model", modelIdentifier,
             "--language", language,
         ]
+        let existingPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let extendedPath = "/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
         process.environment = ProcessInfo.processInfo.environment.merging(
-            ["PYTHONUNBUFFERED": "1"],
+            ["PYTHONUNBUFFERED": "1", "PATH": extendedPath],
             uniquingKeysWith: { _, new in new }
         )
 
