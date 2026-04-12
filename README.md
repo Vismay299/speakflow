@@ -34,6 +34,7 @@ Transcription runs on-device using [mlx-whisper](https://github.com/ml-explore/m
 ```bash
 pip3 install mlx-whisper
 brew install --cask vismay299/speakflow/speakflow
+xattr -cr /Applications/SpeakFlow.app
 ```
 
 No Gatekeeper warnings. No quarantine flags. Just works.
