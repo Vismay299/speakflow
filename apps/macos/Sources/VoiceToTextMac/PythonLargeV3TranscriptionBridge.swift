@@ -269,8 +269,13 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
     /// macOS will compress the 800MB of model weights under App Nap after
     /// a few minutes idle; this ping prevents that so the next real
     /// dictation doesn't pay a decompression/page-in cost.
+    ///
+    /// Non-blocking: if a user dictation is already holding the request
+    /// gate, the ping is dropped rather than queued. Keeping pings out
+    /// of the queue guarantees a timer fire can never delay real work.
     public func ping() async throws {
-        await requestGate.acquire()
+        let acquired = await requestGate.tryAcquire()
+        guard acquired else { return }
         defer {
             Task {
                 await requestGate.release()
@@ -419,6 +424,14 @@ private actor WorkerRequestGate {
         await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }
+    }
+
+    /// Non-blocking acquire. Returns true if the gate was free and is now held;
+    /// false if the gate was busy (caller should drop the work).
+    func tryAcquire() -> Bool {
+        guard !isHeld else { return false }
+        isHeld = true
+        return true
     }
 
     func release() {

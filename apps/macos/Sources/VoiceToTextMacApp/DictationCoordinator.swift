@@ -102,7 +102,10 @@ final class DictationCoordinator {
         // Periodic warmup: run a silent clip through the worker every 90s.
         // Complements the App Nap assertion by actively touching model pages
         // and the Metal context so neither can go cold under memory pressure.
-        let timer = Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { [weak self] _ in
+        // Use an unscheduled Timer added only in .common mode so the timer
+        // still fires during UI tracking (menu open, scroll) without being
+        // registered into multiple run loop modes.
+        let timer = Timer(timeInterval: 90, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.transcriptionService.warmupPing()
             }

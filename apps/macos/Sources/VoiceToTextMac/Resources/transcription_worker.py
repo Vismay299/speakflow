@@ -22,12 +22,25 @@ import time
 import mlx_whisper
 
 
-def _run_silent_transcribe(model_repo: str) -> None:
-    """Run a 0.1s silent clip through the model to touch weights + GPU context."""
+_SILENT_WAV_PATH: str | None = None
+
+
+def _silent_wav_path() -> str:
+    """Return a path to a cached 0.1s silent WAV, creating it once per process.
+
+    Warmup pings fire every ~90s; regenerating + deleting a temp file each
+    time is unnecessary disk I/O that can wake storage on a battery-powered
+    Mac. One file, written once, reused forever.
+    """
+    global _SILENT_WAV_PATH
+    if _SILENT_WAV_PATH is not None:
+        import os
+        if os.path.exists(_SILENT_WAV_PATH):
+            return _SILENT_WAV_PATH
+
     import io
     import struct
     import tempfile
-    import os
 
     num_samples = 1600
     wav_buf = io.BytesIO()
@@ -41,19 +54,22 @@ def _run_silent_transcribe(model_repo: str) -> None:
     wav_buf.write(struct.pack("<I", data_size))
     wav_buf.write(b"\x00" * data_size)
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    try:
-        tmp.write(wav_buf.getvalue())
-        tmp.close()
-        mlx_whisper.transcribe(
-            tmp.name,
-            path_or_hf_repo=model_repo,
-            language="en",
-            task="transcribe",
-            temperature=0.0,
-        )
-    finally:
-        os.unlink(tmp.name)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, prefix="speakflow-silent-")
+    tmp.write(wav_buf.getvalue())
+    tmp.close()
+    _SILENT_WAV_PATH = tmp.name
+    return _SILENT_WAV_PATH
+
+
+def _run_silent_transcribe(model_repo: str) -> None:
+    """Run a 0.1s silent clip through the model to touch weights + GPU context."""
+    mlx_whisper.transcribe(
+        _silent_wav_path(),
+        path_or_hf_repo=model_repo,
+        language="en",
+        task="transcribe",
+        temperature=0.0,
+    )
 
 
 def load_model(model_repo: str) -> str:
