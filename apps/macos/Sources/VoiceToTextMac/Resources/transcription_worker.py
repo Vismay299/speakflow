@@ -22,23 +22,15 @@ import time
 import mlx_whisper
 
 
-def load_model(model_repo: str) -> str:
-    """Warm the model by running a trivial transcription.
-
-    mlx_whisper.transcribe() loads weights on first call. We trigger that
-    here so subsequent calls pay only inference cost, not load cost.
-    Returns the model repo string for reuse.
-    """
-    # Create a tiny silent WAV in memory to trigger model load.
+def _run_silent_transcribe(model_repo: str) -> None:
+    """Run a 0.1s silent clip through the model to touch weights + GPU context."""
     import io
     import struct
     import tempfile
     import os
 
-    # 0.1s of silence at 16kHz mono 16-bit PCM
     num_samples = 1600
     wav_buf = io.BytesIO()
-    # WAV header
     data_size = num_samples * 2
     wav_buf.write(b"RIFF")
     wav_buf.write(struct.pack("<I", 36 + data_size))
@@ -63,6 +55,14 @@ def load_model(model_repo: str) -> str:
     finally:
         os.unlink(tmp.name)
 
+
+def load_model(model_repo: str) -> str:
+    """Warm the model by running a trivial transcription.
+
+    mlx_whisper.transcribe() loads weights on first call. We trigger that
+    here so subsequent calls pay only inference cost, not load cost.
+    """
+    _run_silent_transcribe(model_repo)
     return model_repo
 
 
@@ -144,6 +144,19 @@ def main() -> int:
             request = json.loads(line)
         except json.JSONDecodeError as e:
             print(json.dumps({"error": f"Invalid JSON: {e}"}), file=sys.stdout, flush=True)
+            continue
+
+        # Idle warmup ping: runs a silent clip through the model to keep
+        # weights resident and the Metal context hot. Prevents the slow
+        # "cold" dictation after the app has been idle for several minutes.
+        if request.get("ping") is True:
+            t0 = time.monotonic()
+            try:
+                _run_silent_transcribe(model_repo)
+                ping_ms = int((time.monotonic() - t0) * 1000)
+                print(json.dumps({"pong": True, "ping_ms": ping_ms}), file=sys.stdout, flush=True)
+            except Exception as e:
+                print(json.dumps({"error": f"Ping failed: {e}"}), file=sys.stdout, flush=True)
             continue
 
         audio_path = request.get("input")
