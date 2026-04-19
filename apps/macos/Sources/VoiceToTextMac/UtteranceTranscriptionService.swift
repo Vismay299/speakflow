@@ -56,7 +56,14 @@ public final class UtteranceTranscriptionService: ObservableObject {
         }
     }
 
+    private static let minimumDurationSeconds: TimeInterval = 0.3
+
     public func transcribe(_ artifact: CapturedUtteranceArtifact, mode: DictationMode) async {
+        if artifact.durationSeconds < Self.minimumDurationSeconds {
+            transcriptionState = .idle
+            return
+        }
+
         if recentTranscriptions.contains(where: { $0.id == artifact.id }) {
             return
         }

@@ -8,12 +8,23 @@ import Foundation
 ///   and makes prose more readable.
 public struct TranscriptCleaner: Sendable {
 
+    private static let hallucinationBlocklist: Set<String> = [
+        "thank you", "thank you.", "thanks for watching.",
+        "thanks for watching", "please subscribe.",
+        "please subscribe", "bye.", "bye",
+        "thanks.", "thanks", "you",
+    ]
+
     public init() {}
 
     /// Clean a raw transcript according to the given mode.
     public func clean(_ rawText: String, mode: DictationMode) -> String {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
+
+        if Self.hallucinationBlocklist.contains(trimmed.lowercased()) {
+            return ""
+        }
 
         switch mode {
         case .terminal:
