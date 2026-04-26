@@ -31,6 +31,10 @@ cp -r "${BUILD_DIR}/VoiceToTextMac_VoiceToTextMac.bundle" "${CONTENTS}/MacOS/"
 # Info.plist
 cp "${REPO_ROOT}/apps/macos/Supporting/Info.plist" "${CONTENTS}/Info.plist"
 
+# Clear macOS extended attributes before signing. Finder metadata on copied
+# bundles can make codesign fail with "detritus not allowed".
+xattr -cr "${APP_OUT}"
+
 echo "==> Ad-hoc signing..."
 # SPM resources bundles ship without an Info.plist, which codesign requires.
 # Inject a minimal one so the bundle is signable.
