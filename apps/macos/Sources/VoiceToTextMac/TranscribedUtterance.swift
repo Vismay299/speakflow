@@ -96,9 +96,14 @@ public struct TranscribedUtterance: Codable, Hashable, Identifiable, Sendable {
         self.detectedCommands = detectedCommands
     }
 
-    /// The display text — cleaned if available, raw as fallback.
+    /// The display text — cleaned when available, otherwise cleaned lazily for legacy records.
     public var displayText: String {
-        cleanedText ?? text
+        if let cleanedText {
+            return cleanedText
+        }
+
+        let cleaned = TranscriptCleaner().clean(text, mode: mode ?? .terminal)
+        return cleaned
     }
 
     public var transcriptPreview: String {

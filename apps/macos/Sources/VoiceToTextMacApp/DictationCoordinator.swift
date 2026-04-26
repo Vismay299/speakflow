@@ -18,6 +18,8 @@ final class DictationCoordinator {
     private var bootstrapped = false
     private var lastTranscription: TranscribedUtterance?
     private var lastInsertionResult: InsertionResult?
+    private var partialTranscriptionTask: Task<Void, Never>?
+    private var pendingLiveInsertionTextByArtifactID: [UUID: String] = [:]
 
     /// Activity token that prevents macOS App Nap from throttling us + compressing
     /// the worker's 800MB of model weights while the menu-bar app sits idle.
@@ -194,10 +196,16 @@ final class DictationCoordinator {
                         Task { @MainActor [weak self] in
                             guard let self else { return }
                             let textToInsert = transcription.displayText
-                            if textToInsert.isEmpty { return }
+                            let mode = transcription.mode ?? .terminal
+                            let hasPendingLivePreview = self.pendingLiveInsertionTextByArtifactID[transcription.id] != nil
+                            if textToInsert.isEmpty && !hasPendingLivePreview { return }
 
                             self.shellState.refreshInsertionState(.detectingTarget)
-                            let result = await self.insertFinalTranscript(textToInsert, mode: transcription.mode ?? .terminal)
+                            let result = await self.insertFinalTranscript(
+                                transcription: transcription,
+                                finalText: textToInsert,
+                                mode: mode
+                            )
                             self.lastInsertionResult = result
                             self.shellState.refreshInsertionState(
                                 result.success ? .inserted(result) : .failed(result.errorMessage ?? "Insertion failed")
@@ -254,7 +262,15 @@ final class DictationCoordinator {
 
         if isPressed {
             await captureManager.startCapture()
+            if case .recording(let utteranceID) = captureManager.captureState {
+                transcriptionService.beginPreview(for: utteranceID)
+                startPartialTranscriptionLoop(for: utteranceID)
+            }
         } else {
+            stopPartialTranscriptionLoop()
+            if case .recording(let utteranceID) = captureManager.captureState {
+                transcriptionService.endPreview(for: utteranceID)
+            }
             await captureManager.stopCapture()
         }
     }
@@ -264,11 +280,102 @@ final class DictationCoordinator {
             return
         }
 
-        if case .recording = captureManager.captureState {
+        stopPartialTranscriptionLoop()
+        if case .recording(let utteranceID) = captureManager.captureState {
+            transcriptionService.endPreview(for: utteranceID)
             await captureManager.stopCapture()
         }
     }
-    private func insertFinalTranscript(_ finalText: String, mode: DictationMode) async -> InsertionResult {
+
+    private func startPartialTranscriptionLoop(for artifactID: UUID) {
+        partialTranscriptionTask?.cancel()
+
+        partialTranscriptionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            var lastObservedSizeBytes: Int64 = 0
+            var lastPreviewText = ""
+
+            while !Task.isCancelled {
+                guard case .recording(let currentArtifactID) = self.captureManager.captureState,
+                      currentArtifactID == artifactID else {
+                    break
+                }
+
+                guard let snapshot = self.captureManager.currentArtifactSnapshot() else {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    continue
+                }
+
+                let hasEnoughAudio = snapshot.durationSeconds >= 0.45
+                let hasNewAudio = snapshot.fileSizeBytes > lastObservedSizeBytes
+                guard hasEnoughAudio, hasNewAudio else {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    continue
+                }
+
+                lastObservedSizeBytes = snapshot.fileSizeBytes
+
+                if let partialText = await self.transcriptionService.transcribePartial(snapshot, mode: self.shellState.selectedMode),
+                   partialText != lastPreviewText {
+                    lastPreviewText = partialText
+                    await self.applyLivePreviewInsertionIfNeeded(
+                        text: partialText,
+                        artifactID: artifactID,
+                        mode: self.shellState.selectedMode
+                    )
+                }
+
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            }
+        }
+    }
+
+    private func stopPartialTranscriptionLoop() {
+        partialTranscriptionTask?.cancel()
+        partialTranscriptionTask = nil
+    }
+
+    private func applyLivePreviewInsertionIfNeeded(text: String, artifactID: UUID, mode: DictationMode) async {
+        guard shellState.autoInsertEnabled, mode == .terminal else { return }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if let insertedPreviewText = pendingLiveInsertionTextByArtifactID[artifactID] {
+            guard trimmed.hasPrefix(insertedPreviewText) else {
+                return
+            }
+
+            let delta = String(trimmed.dropFirst(insertedPreviewText.count))
+            guard !delta.isEmpty else { return }
+
+            let result = await insertionEngine.insertLiveTextFragment(delta)
+            if result.success {
+                pendingLiveInsertionTextByArtifactID[artifactID] = trimmed
+                lastInsertionResult = result
+                shellState.refreshInsertionState(.inserted(result))
+            } else {
+                shellState.refreshInsertionState(.failed(result.errorMessage ?? "Live preview insertion failed"))
+            }
+            return
+        }
+
+        let result = await insertionEngine.insertLiveTextFragment(trimmed)
+        if result.success {
+            pendingLiveInsertionTextByArtifactID[artifactID] = trimmed
+            lastInsertionResult = result
+            shellState.refreshInsertionState(.inserted(result))
+        } else {
+            shellState.refreshInsertionState(.failed(result.errorMessage ?? "Live preview insertion failed"))
+        }
+    }
+
+    private func insertFinalTranscript(
+        transcription: TranscribedUtterance,
+        finalText: String,
+        mode: DictationMode
+    ) async -> InsertionResult {
         guard shellState.autoInsertEnabled else {
             return InsertionResult(
                 success: false,
@@ -277,6 +384,14 @@ final class DictationCoordinator {
                 targetAppName: nil,
                 errorMessage: "Auto-insert is disabled.",
                 insertedTextPreview: finalText
+            )
+        }
+
+        if let insertedPreviewText = pendingLiveInsertionTextByArtifactID.removeValue(forKey: transcription.id),
+           mode == .terminal {
+            return await insertionEngine.reconcileLiveText(
+                previousText: insertedPreviewText,
+                finalText: finalText
             )
         }
 

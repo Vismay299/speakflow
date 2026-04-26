@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -36,11 +37,58 @@ _SILENCE_FRAME_MS = 20
 _MIN_TRANSCRIBABLE_MS = 300
 _SILENT_PEAK_THRESHOLD = 80
 _HALLUCINATION_TEXTS = {
-    "thanks for watching",
-    "thanks for watching.",
-    "please subscribe",
-    "please subscribe.",
+    "askforfollowupchange",
+    "askforfollowupchanges",
+    "thanksforwatching",
+    "pleasesubscribe",
 }
+_HALLUCINATION_PATTERNS = [
+    r"\bask\s+for\s+follow(?:\s|-|\u2010|\u2011|\u2012|\u2013|\u2014|\u2212)*up\s+change(?:s)?\b(?:\s*[,.;:!?]+)?",
+    r"\bthanks\s+for\s+watching\b(?:\s*[,.;:!?]+)?",
+    r"\bplease\s+subscribe\b(?:\s*[,.;:!?]+)?",
+]
+_HALLUCINATION_RE = re.compile("|".join(_HALLUCINATION_PATTERNS), re.IGNORECASE)
+
+
+def _is_blocked_hallucination(text: str) -> bool:
+    normalized = "".join(char for char in text.lower() if char.isalpha())
+    return normalized in _HALLUCINATION_TEXTS
+
+
+def _contains_blocked_hallucination(text: str) -> bool:
+    return _HALLUCINATION_RE.search(text) is not None or _is_blocked_hallucination(text)
+
+
+def _strip_blocked_hallucinations(text: str) -> str:
+    cleaned = _HALLUCINATION_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.!?;:])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _sanitize_transcription_text_and_segments(text: str, segments: list[dict]) -> tuple[str, list[dict]]:
+    raw_text = text.strip()
+    raw_text_had_blocked = _contains_blocked_hallucination(raw_text)
+    cleaned_text = _strip_blocked_hallucinations(raw_text)
+
+    if _is_blocked_hallucination(raw_text) or (raw_text_had_blocked and not cleaned_text):
+        return "", []
+
+    cleaned_segments = []
+    for segment in segments:
+        segment_text = segment["text"].strip()
+        cleaned_segment_text = _strip_blocked_hallucinations(segment_text)
+        if cleaned_segment_text and not _is_blocked_hallucination(segment_text):
+            segment["text"] = cleaned_segment_text
+            cleaned_segments.append(segment)
+
+    # The phrase can be split across adjacent Whisper segments, so check the
+    # joined segment surface before returning it to the app.
+    joined_segments = " ".join(segment["text"] for segment in cleaned_segments)
+    if _contains_blocked_hallucination(joined_segments):
+        cleaned_segments = []
+
+    return cleaned_text, cleaned_segments
 
 
 def _normalize_tier(value: object, default_tier: str = "fast") -> str:
@@ -350,10 +398,7 @@ def transcribe_audio(
             "confidence": confidence,
         })
 
-    text = result.get("text", "").strip()
-    if text.lower() in _HALLUCINATION_TEXTS:
-        text = ""
-        segments = []
+    text, segments = _sanitize_transcription_text_and_segments(result.get("text", ""), segments)
 
     duration = original_duration_s
     if segments:

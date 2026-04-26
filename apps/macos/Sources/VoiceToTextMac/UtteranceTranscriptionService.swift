@@ -8,28 +8,33 @@ public final class UtteranceTranscriptionService: ObservableObject {
     @Published public private(set) var transcriptionState: TranscriptionState = .idle
     @Published public private(set) var recentTranscriptions: [TranscribedUtterance] = []
 
-    private let bridge: UtteranceTranscriptionBridging
+    private let finalBridge: UtteranceTranscriptionBridging
+    private let partialBridge: UtteranceTranscriptionBridging
     private let store: TranscribedUtteranceStore
     private let cleaner: TranscriptCleaner
     private let commandParser: VoiceCommandParser
     private var queuedArtifacts: [(artifact: CapturedUtteranceArtifact, mode: DictationMode)] = []
     private var isProcessingQueue = false
     private var activeArtifactID: UUID?
+    private var activePreviewArtifactID: UUID?
     private var completionWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
 
     public init(
         bridge: UtteranceTranscriptionBridging? = nil,
+        partialBridge: UtteranceTranscriptionBridging? = nil,
         store: TranscribedUtteranceStore = TranscribedUtteranceStore(),
         cleaner: TranscriptCleaner = TranscriptCleaner(),
         commandParser: VoiceCommandParser = VoiceCommandParser()
     ) {
         if let bridge {
-            self.bridge = bridge
+            self.finalBridge = bridge
+            self.partialBridge = partialBridge ?? bridge
         } else {
-            self.bridge = (try? PythonLargeV3TranscriptionBridge())
-                ?? UnavailableTranscriptionBridge(
-                    message: "Local transcription dependencies are unavailable. Run `python3 -m pip install -r services/asr-worker/requirements.txt` and relaunch the app."
-                )
+            let unavailable = UnavailableTranscriptionBridge(
+                message: "Local transcription dependencies are unavailable. Run `python3 -m pip install -r services/asr-worker/requirements.txt` and relaunch the app."
+            )
+            self.partialBridge = (try? PythonLargeV3TranscriptionBridge(modelTier: "fast")) ?? unavailable
+            self.finalBridge = (try? PythonLargeV3TranscriptionBridge(modelTier: "quality")) ?? unavailable
         }
         self.store = store
         self.cleaner = cleaner
@@ -39,14 +44,14 @@ public final class UtteranceTranscriptionService: ObservableObject {
     /// Series 13: Start the persistent transcription worker (model preload).
     /// Call once at app startup to eliminate per-utterance process spawn overhead.
     public func startWorker() async {
-        if let persistent = bridge as? PythonLargeV3TranscriptionBridge {
+        for persistent in persistentBridges() {
             try? await persistent.startWorker()
         }
     }
 
     /// Series 13: Stop the persistent transcription worker.
     public func stopWorker() {
-        if let persistent = bridge as? PythonLargeV3TranscriptionBridge {
+        for persistent in persistentBridges() {
             persistent.stopWorker()
         }
     }
@@ -56,9 +61,10 @@ public final class UtteranceTranscriptionService: ObservableObject {
     /// coordinator to counter macOS App Nap memory compression when the
     /// app has been idle.
     public func warmupPing() async {
-        guard let persistent = bridge as? PythonLargeV3TranscriptionBridge else { return }
         guard activeArtifactID == nil, !isProcessingQueue else { return }
-        try? await persistent.ping()
+        for persistent in persistentBridges() {
+            try? await persistent.ping()
+        }
     }
 
     public func bootstrap() {
@@ -86,20 +92,35 @@ public final class UtteranceTranscriptionService: ObservableObject {
         }
     }
 
+    public func beginPreview(for artifactID: UUID) {
+        activePreviewArtifactID = artifactID
+    }
+
+    public func endPreview(for artifactID: UUID) {
+        guard activePreviewArtifactID == artifactID else { return }
+        activePreviewArtifactID = nil
+        if case .partial = transcriptionState {
+            transcriptionState = .idle
+        }
+    }
+
     /// Series 13: Transcribe the currently-recording WAV file for partial, live text display.
     /// Does not persist the result — it's purely for real-time UI feedback while the hotkey is held.
     public func transcribePartial(_ artifact: CapturedUtteranceArtifact, mode: DictationMode) async -> String? {
         do {
-            let raw = try await bridge.transcribe(artifact)
+            let raw = try await partialBridge.transcribe(artifact)
             // Live partial insertion must stay close to the raw transcript.
             // Applying cleaner/command transforms on unstable partials makes
             // the CLI look random because those transforms can change as the
             // model revises earlier words. Reserve cleanup and command parsing
             // for the final transcript only.
-            let displayText = raw.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                transcriptionState = .partial(partialText: displayText)
-                return displayText
+            let displayText = cleaner.suppressKnownHallucinations(in: raw.text)
+            let trimmedDisplayText = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedDisplayText.isEmpty,
+               !cleaner.isKnownHallucinationPrefix(trimmedDisplayText),
+               activePreviewArtifactID == artifact.id {
+                transcriptionState = .partial(partialText: trimmedDisplayText)
+                return trimmedDisplayText
             }
         } catch {
             // Partial transcription failures are silent — the final transcription will still run.
@@ -133,15 +154,16 @@ public final class UtteranceTranscriptionService: ObservableObject {
             let nextArtifact = item.artifact
             let mode = item.mode
             activeArtifactID = nextArtifact.id
+            activePreviewArtifactID = nil
             transcriptionState = .transcribing(utteranceID: nextArtifact.id)
 
             do {
                 let pipelineStart = Date()
-                let raw = try await bridge.transcribe(nextArtifact)
+                let raw = try await finalBridge.transcribe(nextArtifact)
                 logLatencyMetrics(raw.latencyMetricsMs, artifact: nextArtifact)
                 let cleaned = cleaner.clean(raw.text, mode: mode)
                 let commandResult = commandParser.parse(cleaned)
-                let finalText = commandResult.cleanedText.isEmpty ? nil : commandResult.cleanedText
+                let finalText = commandResult.cleanedText
                 let transcriptURL = try store.transcriptURL(for: nextArtifact.id)
                 let transcription = TranscribedUtterance(
                     id: nextArtifact.id,
@@ -209,5 +231,17 @@ public final class UtteranceTranscriptionService: ObservableObject {
         Self.log.info(
             "ASR latency utterance=\(artifact.id.uuidString, privacy: .public) original=\(original, format: .fixed(precision: 0))ms trimmed=\(trimmed, format: .fixed(precision: 0))ms lead=\(trimLead, format: .fixed(precision: 0))ms trail=\(trimTrail, format: .fixed(precision: 0))ms mlx=\(mlx, format: .fixed(precision: 0))ms total=\(total, format: .fixed(precision: 0))ms skipped=\(skipped, format: .fixed(precision: 0))"
         )
+    }
+
+    private func persistentBridges() -> [PythonLargeV3TranscriptionBridge] {
+        var bridges: [PythonLargeV3TranscriptionBridge] = []
+        if let partialPersistent = partialBridge as? PythonLargeV3TranscriptionBridge {
+            bridges.append(partialPersistent)
+        }
+        if let finalPersistent = finalBridge as? PythonLargeV3TranscriptionBridge,
+           !bridges.contains(where: { $0 === finalPersistent }) {
+            bridges.append(finalPersistent)
+        }
+        return bridges
     }
 }

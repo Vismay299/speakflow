@@ -40,9 +40,14 @@ public struct SnippetRecord: Sendable, Hashable, Identifiable {
         self.updatedAt = updatedAt
     }
 
-    /// The display text — cleaned if available, raw as fallback.
+    /// The display text — cleaned when available, otherwise cleaned lazily for legacy records.
     public var displayText: String {
-        cleanedText ?? rawText
+        if let cleanedText {
+            return cleanedText
+        }
+
+        let dictationMode = DictationMode(rawValue: mode) ?? .terminal
+        return TranscriptCleaner().clean(rawText, mode: dictationMode)
     }
 
     public var preview: String {

@@ -82,6 +82,32 @@ final class FakeTranscriptionBridge: UtteranceTranscriptionBridging, @unchecked 
     }
 }
 
+final class StaticTranscriptionBridge: UtteranceTranscriptionBridging, @unchecked Sendable {
+    private let text: String
+
+    init(text: String) {
+        self.text = text
+    }
+
+    func transcribe(_ artifact: CapturedUtteranceArtifact) async throws -> RawTranscriptionResult {
+        RawTranscriptionResult(
+            modelIdentifier: "test-model",
+            language: "en",
+            durationSeconds: max(artifact.durationSeconds, 0.25),
+            text: text,
+            segments: text.isEmpty ? [] : [
+                TranscribedUtteranceSegment(
+                    index: 0,
+                    startSeconds: 0,
+                    endSeconds: max(artifact.durationSeconds, 0.25),
+                    text: text,
+                    confidence: 0.5
+                )
+            ]
+        )
+    }
+}
+
 Task { @MainActor in
     var failures: [String] = []
 
@@ -173,6 +199,22 @@ Task { @MainActor in
     expect(reloadedTranscriptions.first?.id == persistedTranscription.id, "Transcript store should reload persisted transcripts.")
     expect(reloadedTranscriptions.first?.transcriptPreview.contains("hello") == true, "Transcript preview should preserve the text.")
 
+    let legacyHallucinationTranscription = TranscribedUtterance(
+        id: UUID(),
+        capturedAt: Date(timeIntervalSince1970: 0),
+        transcribedAt: Date(timeIntervalSince1970: 60),
+        sourceAudioURL: recordingURL,
+        transcriptURL: transcriptURL,
+        modelIdentifier: "legacy-model",
+        language: "en",
+        durationSeconds: 1.0,
+        text: "Ask for follow-up changes!",
+        segments: [],
+        cleanedText: nil,
+        mode: .terminal
+    )
+    expect(legacyHallucinationTranscription.displayText.isEmpty, "Legacy transcriptions without cleaned text should not display raw hallucination text.")
+
     let queueBridge = FakeTranscriptionBridge()
     let queueService = UtteranceTranscriptionService(
         bridge: queueBridge,
@@ -201,6 +243,98 @@ Task { @MainActor in
     let maxConcurrent = queueBridge.probe.maxActiveCount
     expect(maxConcurrent == 1, "Transcription service should serialize utterances instead of running bridge calls concurrently.")
     expect(queueService.recentTranscriptions.count == 2, "Transcription service should keep both queued transcription results.")
+
+    let hallucinationBridge = StaticTranscriptionBridge(text: "Ask for follow\u{2011}up changes .")
+    let hallucinationService = UtteranceTranscriptionService(
+        bridge: hallucinationBridge,
+        partialBridge: hallucinationBridge,
+        store: TranscribedUtteranceStore(baseDirectoryURL: temporaryRoot.appendingPathComponent("hallucination", isDirectory: true))
+    )
+    let hallucinationArtifact = CapturedUtteranceArtifact(
+        id: UUID(),
+        fileURL: recordingURL,
+        createdAt: Date(),
+        durationSeconds: 0.8,
+        fileSizeBytes: 4
+    )
+
+    hallucinationService.beginPreview(for: hallucinationArtifact.id)
+    let hallucinationPreview = await hallucinationService.transcribePartial(hallucinationArtifact, mode: .terminal)
+    expect(hallucinationPreview == nil, "Partial preview should suppress known hallucination boilerplate.")
+    hallucinationService.endPreview(for: hallucinationArtifact.id)
+
+    await hallucinationService.transcribe(hallucinationArtifact, mode: .terminal)
+    if case .transcribed(let transcription) = hallucinationService.transcriptionState {
+        expect(transcription.cleanedText == "", "Final transcription should preserve an intentionally empty cleaned result.")
+        expect(transcription.displayText.isEmpty, "Final display text should not fall back to raw hallucinated text.")
+    } else {
+        failures.append("Hallucination transcription should finish as an empty transcript.")
+    }
+
+    let hallucinationPrefixBridge = StaticTranscriptionBridge(text: "Ask for follow-up")
+    let hallucinationPrefixService = UtteranceTranscriptionService(
+        bridge: hallucinationPrefixBridge,
+        partialBridge: hallucinationPrefixBridge,
+        store: TranscribedUtteranceStore(baseDirectoryURL: temporaryRoot.appendingPathComponent("hallucination-prefix", isDirectory: true))
+    )
+    let hallucinationPrefixArtifact = CapturedUtteranceArtifact(
+        id: UUID(),
+        fileURL: recordingURL,
+        createdAt: Date(),
+        durationSeconds: 0.8,
+        fileSizeBytes: 4
+    )
+
+    hallucinationPrefixService.beginPreview(for: hallucinationPrefixArtifact.id)
+    let hallucinationPrefixPreview = await hallucinationPrefixService.transcribePartial(hallucinationPrefixArtifact, mode: .terminal)
+    expect(hallucinationPrefixPreview == nil, "Partial preview should suppress known hallucination prefixes before the final word arrives.")
+    hallucinationPrefixService.endPreview(for: hallucinationPrefixArtifact.id)
+
+    let hallucinationShortPrefixBridge = StaticTranscriptionBridge(text: "Ask")
+    let hallucinationShortPrefixService = UtteranceTranscriptionService(
+        bridge: hallucinationShortPrefixBridge,
+        partialBridge: hallucinationShortPrefixBridge,
+        store: TranscribedUtteranceStore(baseDirectoryURL: temporaryRoot.appendingPathComponent("hallucination-short-prefix", isDirectory: true))
+    )
+    let hallucinationShortPrefixArtifact = CapturedUtteranceArtifact(
+        id: UUID(),
+        fileURL: recordingURL,
+        createdAt: Date(),
+        durationSeconds: 0.8,
+        fileSizeBytes: 4
+    )
+
+    hallucinationShortPrefixService.beginPreview(for: hallucinationShortPrefixArtifact.id)
+    let hallucinationShortPrefixPreview = await hallucinationShortPrefixService.transcribePartial(hallucinationShortPrefixArtifact, mode: .terminal)
+    expect(hallucinationShortPrefixPreview == nil, "Partial preview should hold very short hallucination prefixes until they disambiguate.")
+    hallucinationShortPrefixService.endPreview(for: hallucinationShortPrefixArtifact.id)
+
+    let previewBridge = FakeTranscriptionBridge()
+    let previewService = UtteranceTranscriptionService(
+        bridge: previewBridge,
+        partialBridge: previewBridge,
+        store: TranscribedUtteranceStore(baseDirectoryURL: temporaryRoot.appendingPathComponent("preview", isDirectory: true))
+    )
+    let previewArtifact = CapturedUtteranceArtifact(
+        id: UUID(),
+        fileURL: recordingURL,
+        createdAt: Date(),
+        durationSeconds: 0.8,
+        fileSizeBytes: 4
+    )
+
+    previewService.beginPreview(for: previewArtifact.id)
+    let previewText = await previewService.transcribePartial(previewArtifact, mode: .terminal)
+    expect(previewText?.contains("artifact") == true, "Preview transcription should return live text when preview is active.")
+    if case .partial(let partialText) = previewService.transcriptionState {
+        expect(partialText == previewText, "Preview state should publish the latest partial text.")
+    } else {
+        failures.append("Preview transcription should set the service state to .partial.")
+    }
+
+    previewService.endPreview(for: previewArtifact.id)
+    _ = await previewService.transcribePartial(previewArtifact, mode: .terminal)
+    expect(previewService.transcriptionState == .idle, "Preview updates should be ignored after preview mode ends.")
 
     if envFlag("VOICE_TO_TEXT_MACOS_SMOKE_CAPTURE") {
         if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
@@ -467,6 +601,40 @@ Task { @MainActor in
     let hallucinatedThanks = cleaner.clean("Thanks for watching.", mode: .terminal)
     expect(hallucinatedThanks.isEmpty, "Cleaner should suppress obvious boilerplate hallucination phrases: '\(hallucinatedThanks)'")
 
+    let followUpChanges = cleaner.clean("Ask for follow-up changes", mode: .terminal)
+    expect(followUpChanges.isEmpty, "Cleaner should suppress recurring follow-up hallucination phrases: '\(followUpChanges)'")
+
+    let followUpChangesVariant = cleaner.clean("Ask for follow-up changes!", mode: .terminal)
+    expect(followUpChangesVariant.isEmpty, "Cleaner should suppress hallucination variants with punctuation: '\(followUpChangesVariant)'")
+
+    let followUpChangesSpacedPunctuation = cleaner.clean("Ask for follow-up changes .", mode: .terminal)
+    expect(followUpChangesSpacedPunctuation.isEmpty, "Cleaner should suppress follow-up hallucinations with spaced punctuation: '\(followUpChangesSpacedPunctuation)'")
+
+    let followUpChangesUnicodeDash = cleaner.clean("Ask for follow\u{2011}up changes!", mode: .terminal)
+    expect(followUpChangesUnicodeDash.isEmpty, "Cleaner should suppress follow-up hallucinations with Unicode hyphen variants: '\(followUpChangesUnicodeDash)'")
+
+    let followUpChangeSingular = cleaner.clean("Ask for follow-up change.", mode: .terminal)
+    expect(followUpChangeSingular.isEmpty, "Cleaner should suppress singular follow-up hallucination variants: '\(followUpChangeSingular)'")
+
+    let partialFollowUpPrefix = cleaner.suppressKnownHallucinations(in: "Ask for follow-up")
+    expect(partialFollowUpPrefix.isEmpty, "Cleaner should suppress live partial follow-up hallucination prefixes: '\(partialFollowUpPrefix)'")
+
+    let partialFollowPrefix = cleaner.suppressKnownHallucinations(in: "Ask for follow")
+    expect(partialFollowPrefix.isEmpty, "Cleaner should suppress shorter live partial follow-up hallucination prefixes: '\(partialFollowPrefix)'")
+
+    expect(cleaner.isKnownHallucinationPrefix("Ask"), "Cleaner should flag short live partials that are still possible hallucination prefixes.")
+    expect(cleaner.isKnownHallucinationPrefix("Ask for"), "Cleaner should flag ask-for live partials before they disambiguate.")
+    expect(!cleaner.isKnownHallucinationPrefix("Ask for help"), "Cleaner should stop flagging live partials once they diverge from known hallucinations.")
+
+    let legitimateAskForHelp = cleaner.clean("Ask for help", mode: .terminal)
+    expect(legitimateAskForHelp == "Ask for help", "Cleaner should not overblock legitimate ask-for text: '\(legitimateAskForHelp)'")
+
+    let legitimateFollowUpRequest = cleaner.clean("Ask for follow-up on the ticket", mode: .terminal)
+    expect(legitimateFollowUpRequest == "Ask for follow-up on the ticket", "Cleaner should only suppress whole hallucination prefixes, not legitimate follow-up requests: '\(legitimateFollowUpRequest)'")
+
+    let embeddedFollowUpChanges = cleaner.clean("hello Ask for follow-up changes!", mode: .terminal)
+    expect(embeddedFollowUpChanges == "hello", "Cleaner should remove embedded follow-up hallucination text: '\(embeddedFollowUpChanges)'")
+
     // Whitespace-only input
     let wsOnly = cleaner.clean("   \n  ", mode: .terminal)
     expect(wsOnly == "", "Cleaner should return empty string for whitespace-only input: '\(wsOnly)'")
@@ -505,6 +673,7 @@ Task { @MainActor in
 
     // Rich editor classification
     expect(KnownAppType.classify(bundleId: "com.notion.id") == .richEditor, "Notion should be classified as richEditor")
+    expect(KnownAppType.classify(bundleId: "com.openai.codex") == .richEditor, "Codex should prefer paste over AX field mutation")
     expect(KnownAppType.classify(bundleId: "com.microsoft.VSCode") == .richEditor, "VS Code should be classified as richEditor")
 
     // Plain text editor classification
@@ -530,6 +699,12 @@ Task { @MainActor in
     expect(TerminalAppMode.mode(for: "com.googlecode.iterm2") == .bracketedPaste, "iTerm2 should be bracketed paste")
     expect(TerminalAppMode.mode(for: "dev.warp.Warp-Stable") == .bracketedPaste, "Warp should be bracketed paste")
     expect(TerminalAppMode.mode(for: "com.unknown.App") == nil, "Unknown app should have nil mode")
+
+    let insertionEngine = TextInsertionEngine()
+    expect(
+        insertionEngine.sharedCharacterPrefixLength("hello there", "hello world") == 6,
+        "Shared prefix helper should count matching leading characters."
+    )
 
     // MARK: - Series 13: Latency Optimization Tests
 
@@ -618,6 +793,9 @@ Task { @MainActor in
     let nullLoaded = allAfterNull.first { $0.rawText == "no target" }
     expect(nullLoaded?.targetAppName == nil, "Null targetAppName should round-trip")
     expect(nullLoaded?.insertionSuccess == nil, "Null insertionSuccess should round-trip")
+
+    let legacyHallucinationSnippet = SnippetRecord(rawText: "Ask for follow-up changes!", cleanedText: nil, mode: "Terminal")
+    expect(legacyHallucinationSnippet.displayText.isEmpty, "Legacy snippets without cleaned text should not display raw hallucination text.")
 
     let preDeleteCount = try! testStore.count()
     try! testStore.delete(id: oneRecord.id)

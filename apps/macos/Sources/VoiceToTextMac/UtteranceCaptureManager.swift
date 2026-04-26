@@ -111,6 +111,31 @@ public final class UtteranceCaptureManager: ObservableObject {
         return url
     }
 
+    public func currentArtifactSnapshot() -> CapturedUtteranceArtifact? {
+        guard let utteranceID = activeUtteranceID,
+              let createdAt = activeUtteranceCreatedAt,
+              let recordingURL = activeRecordingURL,
+              let recorder else {
+            return nil
+        }
+
+        let fileSizeBytes: Int64
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: recordingURL.path),
+           let size = attributes[.size] as? NSNumber {
+            fileSizeBytes = size.int64Value
+        } else {
+            fileSizeBytes = 0
+        }
+
+        return CapturedUtteranceArtifact(
+            id: utteranceID,
+            fileURL: recordingURL,
+            createdAt: createdAt,
+            durationSeconds: max(0, recorder.currentTime),
+            fileSizeBytes: fileSizeBytes
+        )
+    }
+
     private func resetRecorderState() {
         recorder = nil
         activeUtteranceID = nil

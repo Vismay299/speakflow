@@ -331,7 +331,7 @@ public final class ShellState: ObservableObject {
             return SnippetHistoryItem(
                 id: item.id,
                 mode: selectedMode,
-                text: cleanedText.isEmpty ? item.text : cleanedText,
+                text: cleanedText,
                 createdAt: item.createdAt
             )
         }

@@ -8,25 +8,86 @@ import Foundation
 ///   and makes prose more readable.
 public struct TranscriptCleaner: Sendable {
     private static let hallucinationBlocklist: Set<String> = [
-        "thanks for watching",
-        "thanks for watching.",
-        "please subscribe",
-        "please subscribe.",
+        "askforfollowupchange",
+        "askforfollowupchanges",
+        "thanksforwatching",
+        "pleasesubscribe",
+    ]
+    private static let hallucinationPatterns: [String] = [
+        "\\bask\\s+for\\s+follow(?:\\s|-|\\x{2010}|\\x{2011}|\\x{2012}|\\x{2013}|\\x{2014}|\\x{2212})*up\\s+change(?:s)?\\b(?:\\s*[,.;:!?]+)?",
+        "\\bthanks\\s+for\\s+watching\\b(?:\\s*[,.;:!?]+)?",
+        "\\bplease\\s+subscribe\\b(?:\\s*[,.;:!?]+)?",
+    ]
+    private static let hallucinationPrefixPatterns: [String] = [
+        "^\\s*ask\\s+for\\s+follow(?:\\s|-|\\x{2010}|\\x{2011}|\\x{2012}|\\x{2013}|\\x{2014}|\\x{2212})*(?:u(?:p)?)?\\s*(?:[,.;:!?]+)?\\s*$",
     ]
 
     public init() {}
 
     /// Clean a raw transcript according to the given mode.
     public func clean(_ rawText: String, mode: DictationMode) -> String {
-        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripped = suppressKnownHallucinations(in: rawText)
+        let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
-        guard !Self.hallucinationBlocklist.contains(trimmed.lowercased()) else { return "" }
+        guard !Self.isBlockedHallucination(trimmed) else { return "" }
 
         switch mode {
         case .terminal:
             return cleanForTerminal(trimmed)
         case .writing:
             return cleanForWriting(trimmed)
+        }
+    }
+
+    /// Remove known ASR boilerplate hallucinations without applying mode-specific cleanup.
+    public func suppressKnownHallucinations(in text: String) -> String {
+        var result = text
+        var didSuppressHallucination = false
+
+        for pattern in Self.hallucinationPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            let range = NSRange(result.startIndex..., in: result)
+            let matchCount = regex.numberOfMatches(in: result, range: range)
+            guard matchCount > 0 else {
+                continue
+            }
+
+            didSuppressHallucination = true
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
+        }
+
+        if Self.isBlockedHallucinationPrefix(result) {
+            return ""
+        }
+
+        result = result.replacingOccurrences(
+            of: "[ \t]{2,}",
+            with: " ",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: "\\s+([,.!?;:])",
+            with: "$1",
+            options: .regularExpression
+        )
+
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if didSuppressHallucination, !Self.containsAlphanumeric(trimmed) {
+            return ""
+        }
+
+        return trimmed
+    }
+
+    /// Returns true while an unstable live partial is still only a prefix of
+    /// known ASR boilerplate. Final transcripts still pass through full cleanup.
+    public func isKnownHallucinationPrefix(_ text: String) -> Bool {
+        let normalized = Self.normalizedHallucinationKey(text)
+        guard normalized.count >= 3 else { return false }
+        return Self.hallucinationBlocklist.contains { blocked in
+            blocked.hasPrefix(normalized)
         }
     }
 
@@ -242,5 +303,35 @@ public struct TranscriptCleaner: Sendable {
             with: " ",
             options: .regularExpression
         )
+    }
+
+    private static func isBlockedHallucination(_ text: String) -> Bool {
+        let normalized = normalizedHallucinationKey(text)
+        return hallucinationBlocklist.contains(normalized)
+    }
+
+    private static func isBlockedHallucinationPrefix(_ text: String) -> Bool {
+        for pattern in hallucinationPrefixPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+
+            let range = NSRange(text.startIndex..., in: text)
+            if regex.firstMatch(in: text, range: range) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func containsAlphanumeric(_ text: String) -> Bool {
+        text.contains { character in
+            character.isLetter || character.isNumber
+        }
+    }
+
+    private static func normalizedHallucinationKey(_ text: String) -> String {
+        text.lowercased().filter(\.isLetter)
     }
 }

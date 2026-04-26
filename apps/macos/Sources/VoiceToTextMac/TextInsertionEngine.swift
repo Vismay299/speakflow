@@ -63,6 +63,7 @@ public enum KnownAppType: String, Codable, Sendable, Hashable {
 
         // Rich editors (Series 11) — AX is unreliable, prefer paste
         case "com.notion.id",
+             "com.openai.codex",
              "com.microsoft.VSCode",
              "com.microsoft.VSCodeInsiders",
              "com.jetbrains.intellij",
@@ -215,8 +216,6 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
     private static let focusDelayNanoseconds: UInt64 = 10_000_000
     private static let appActivationDelayNanoseconds: UInt64 = 200_000_000
     private static let appActivationPollNanoseconds: UInt64 = 10_000_000
-    /// Series 13: reduced from 500ms → 200ms.
-    private static let pasteRestoreDelayNanoseconds: UInt64 = 200_000_000
     /// Use the session tap only for the first paste right after wake.
     /// Normal insertions should keep using the previously working HID path.
     private static let postWakeSessionTapWindow: TimeInterval = 15
@@ -251,6 +250,111 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
     /// The inserted text appears at the cursor and the user must manually submit.
     public func insertText(_ text: String) async -> InsertionResult {
         await insertText(text, asFragment: false, requireTerminalTarget: false)
+    }
+
+    public func insertLiveTextFragment(_ text: String) async -> InsertionResult {
+        await insertText(text, asFragment: true, requireTerminalTarget: true)
+    }
+
+    public func reconcileLiveText(previousText: String, finalText: String) async -> InsertionResult {
+        guard !previousText.isEmpty else {
+            guard !finalText.isEmpty else {
+                return InsertionResult(
+                    success: true,
+                    strategy: .pasteViaClipboard,
+                    targetAppBundleId: nil,
+                    targetAppName: nil,
+                    errorMessage: nil,
+                    insertedTextPreview: ""
+                )
+            }
+            return await insertLiveTextFragment(finalText)
+        }
+
+        state = .detectingTarget
+
+        guard let target = currentInsertionTarget() else {
+            let result = InsertionResult(
+                success: false,
+                strategy: .notAvailable,
+                targetAppBundleId: nil,
+                targetAppName: nil,
+                errorMessage: "No frontmost application found.",
+                insertedTextPreview: textPreview(finalText.isEmpty ? previousText : finalText)
+            )
+            state = .failed(result.errorMessage!)
+            return result
+        }
+
+        guard target.appType == .terminal else {
+            let result = InsertionResult(
+                success: false,
+                strategy: .notAvailable,
+                targetAppBundleId: target.bundleId,
+                targetAppName: target.appName,
+                errorMessage: "Live reconciliation is only supported for terminal targets.",
+                insertedTextPreview: textPreview(finalText.isEmpty ? previousText : finalText)
+            )
+            state = .failed(result.errorMessage!)
+            return result
+        }
+
+        let previousSanitized = sanitizeForInsertion(
+            previousText,
+            appType: target.appType,
+            bundleId: target.bundleId,
+            asFragment: true
+        )
+        let finalSanitized = sanitizeForInsertion(
+            finalText,
+            appType: target.appType,
+            bundleId: target.bundleId,
+            asFragment: true
+        )
+
+        let sharedPrefixLength = sharedCharacterPrefixLength(previousSanitized, finalSanitized)
+        let charactersToDelete = max(0, previousSanitized.count - sharedPrefixLength)
+        let suffixToInsert = String(finalSanitized.dropFirst(sharedPrefixLength))
+
+        if charactersToDelete > 0 {
+            let deleteResult = await deleteBackward(
+                count: charactersToDelete,
+                app: target.app,
+                bundleId: target.bundleId,
+                appName: target.appName
+            )
+            guard deleteResult.success else {
+                return deleteResult
+            }
+        }
+
+        if suffixToInsert.isEmpty {
+            return InsertionResult(
+                success: true,
+                strategy: .pasteViaClipboard,
+                targetAppBundleId: target.bundleId,
+                targetAppName: target.appName,
+                errorMessage: nil,
+                insertedTextPreview: textPreview(finalSanitized)
+            )
+        }
+
+        let suffixResult = await insertViaPaste(
+            suffixToInsert,
+            appBundleId: target.bundleId,
+            appName: target.appName,
+            appType: target.appType,
+            asFragment: true
+        )
+
+        return InsertionResult(
+            success: suffixResult.success,
+            strategy: suffixResult.strategy,
+            targetAppBundleId: suffixResult.targetAppBundleId,
+            targetAppName: suffixResult.targetAppName,
+            errorMessage: suffixResult.errorMessage,
+            insertedTextPreview: textPreview(finalSanitized)
+        )
     }
 
     private func insertText(_ text: String, asFragment: Bool, requireTerminalTarget: Bool) async -> InsertionResult {
@@ -462,16 +566,20 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
 
                     let before = existing[..<start]
                     let after = existing[end...]
-                    let newText = before + text + after
+                    let newText = String(before + text + after)
+                    let sanitizedText = sanitizeAccessibilityFieldValue(newText)
 
                     let setResult = AXUIElementSetAttributeValue(
                         element,
                         kAXValueAttribute as CFString,
-                        String(newText) as CFTypeRef
+                        sanitizedText as CFTypeRef
                     )
 
                     if setResult == .success {
-                        let newLocation = location + text.utf16.count
+                        let requestedLocation = location + text.utf16.count
+                        let newLocation = sanitizedText == newText
+                            ? requestedLocation
+                            : min(requestedLocation, sanitizedText.utf16.count)
                         updateCursorPosition(element, to: newLocation)
                         return true
                     }
@@ -505,9 +613,9 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
 
         let newText: String
         if getResult == .success, let existing = currentValue as? String {
-            newText = existing + text
+            newText = sanitizeAccessibilityFieldValue(existing + text)
         } else {
-            newText = text
+            newText = sanitizeAccessibilityFieldValue(text)
         }
 
         let setResult = AXUIElementSetAttributeValue(
@@ -517,6 +625,10 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
         )
 
         return setResult == .success
+    }
+
+    func sanitizeAccessibilityFieldValue(_ text: String) -> String {
+        TranscriptCleaner().suppressKnownHallucinations(in: text)
     }
 
     // MARK: - Clipboard Paste (Fallback for terminals, browsers, and rich editors)
@@ -550,9 +662,6 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
             try? await Task.sleep(nanoseconds: Self.focusDelayNanoseconds)
         }
 
-        let pasteboard = NSPasteboard.general
-        let oldContents = pasteboard.string(forType: .string)
-
         // Sanitize text based on app type.
         let sanitized = sanitizeForInsertion(text, appType: appType, bundleId: appBundleId, asFragment: asFragment)
         // Build the final pasteboard content ONCE, before activation.
@@ -563,11 +672,9 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
             finalContent = sanitized
         }
 
+        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(finalContent, forType: .string)
-
-        let markerType = NSPasteboard.PasteboardType("com.speakflow.insertion-marker")
-        pasteboard.setString(UUID().uuidString, forType: markerType)
 
         // Series 13: skip activation delay if the target app is already frontmost.
         if app.isActive {
@@ -580,24 +687,6 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
         // Simulate Cmd+V after the target app is frontmost so it receives the paste.
         simulateCmdV(using: currentPasteEventTap())
 
-        // Safe clipboard restore: only restore if the marker is still present.
-        let markerBeforeRestore = pasteboard.string(forType: markerType)
-        let oldContentsForRestore = oldContents
-
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: Self.pasteRestoreDelayNanoseconds)
-            let pb = NSPasteboard.general
-            if pb.string(forType: markerType) == markerBeforeRestore {
-                if let old = oldContentsForRestore {
-                    pb.clearContents()
-                    pb.setString(old, forType: .string)
-                }
-            } else {
-                Self.log.debug("Pasteboard: user copied something new, skipping restore")
-            }
-            pb.setString("", forType: markerType)
-        }
-
         return InsertionResult(
             success: true,
             strategy: .pasteViaClipboard,
@@ -605,6 +694,44 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
             targetAppName: appName,
             errorMessage: nil,
             insertedTextPreview: textPreview(sanitized)
+        )
+    }
+
+    private func deleteBackward(
+        count: Int,
+        app: NSRunningApplication,
+        bundleId: String,
+        appName: String
+    ) async -> InsertionResult {
+        guard count > 0 else {
+            return InsertionResult(
+                success: true,
+                strategy: .pasteViaClipboard,
+                targetAppBundleId: bundleId,
+                targetAppName: appName,
+                errorMessage: nil,
+                insertedTextPreview: ""
+            )
+        }
+
+        state = .inserting(strategy: .pasteViaClipboard)
+
+        if app.isActive {
+            Self.log.debug("Target app already frontmost — skipping activation delay before delete")
+        } else {
+            app.activate(options: .activateIgnoringOtherApps)
+            await waitForActivation(bundleId: bundleId)
+        }
+
+        simulateDeleteBackward(count: count)
+
+        return InsertionResult(
+            success: true,
+            strategy: .pasteViaClipboard,
+            targetAppBundleId: bundleId,
+            targetAppName: appName,
+            errorMessage: nil,
+            insertedTextPreview: ""
         )
     }
 
@@ -637,6 +764,15 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
         let mode = TerminalAppMode.mode(for: bundleId)
         guard mode != nil else { return text }
         return sanitizeForTerminal(text, mode: mode, asFragment: asFragment)
+    }
+
+    public func sharedCharacterPrefixLength(_ lhs: String, _ rhs: String) -> Int {
+        var count = 0
+        for (left, right) in zip(lhs, rhs) {
+            guard left == right else { break }
+            count += 1
+        }
+        return count
     }
 
     private func sanitizeForTerminal(_ text: String, mode: TerminalAppMode?, asFragment: Bool) -> String {
@@ -711,6 +847,17 @@ public final class TextInsertionEngine: ObservableObject, Sendable {
         let vKeyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
         vKeyUp?.flags = .maskCommand
         vKeyUp?.post(tap: tap == .session ? .cgSessionEventTap : .cghidEventTap)
+    }
+
+    private func simulateDeleteBackward(count: Int) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for _ in 0..<count {
+            let deleteKeyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true)
+            deleteKeyDown?.post(tap: .cghidEventTap)
+
+            let deleteKeyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
+            deleteKeyUp?.post(tap: .cghidEventTap)
+        }
     }
 
     // MARK: - Helpers
