@@ -117,14 +117,16 @@ public final class PythonLargeV3TranscriptionBridge: UtteranceTranscriptionBridg
         modelTier: String? = nil,
         language: String = "en"
     ) throws {
-        // Resolve the persistent worker script.
-        let resolvedWorkerURL = Bundle.module.url(forResource: "transcription_worker", withExtension: "py")
+        // Resolve the persistent worker script without using Bundle.module.
+        // SwiftPM's generated Bundle.module accessor can fatalError before the
+        // app has a chance to show a recoverable error if packaging is wrong.
+        let resolvedWorkerURL = BundledResourceLocator.url(forResource: "transcription_worker", withExtension: "py")
         guard let workerURL = resolvedWorkerURL else {
             throw TranscriptionBridgeError.missingScript
         }
 
         // Keep the legacy script URL for fallback reference.
-        let resolvedLegacyURL = scriptURL ?? Bundle.module.url(forResource: "transcribe_utterance", withExtension: "py")
+        let resolvedLegacyURL = scriptURL ?? BundledResourceLocator.url(forResource: "transcribe_utterance", withExtension: "py")
         guard let legacyURL = resolvedLegacyURL else {
             throw TranscriptionBridgeError.missingScript
         }

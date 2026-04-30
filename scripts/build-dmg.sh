@@ -21,6 +21,7 @@ echo "==> Creating ${DMG_NAME}..."
 
 TMP_DIR=$(mktemp -d)
 cp -r "${APP_PATH}" "${TMP_DIR}/"
+xattr -cr "${TMP_DIR}/${APP_NAME}.app"
 ln -s /Applications "${TMP_DIR}/Applications"
 
 hdiutil create \

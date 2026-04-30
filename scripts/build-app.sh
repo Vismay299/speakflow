@@ -25,8 +25,8 @@ echo "==> Assembling .app bundle..."
 cp "${BUILD_DIR}/VoiceToTextMac" "${CONTENTS}/MacOS/VoiceToTextMac"
 chmod +x "${CONTENTS}/MacOS/VoiceToTextMac"
 
-# Resources bundle — must sit next to the binary so Bundle.module can find it
-cp -r "${BUILD_DIR}/VoiceToTextMac_VoiceToTextMac.bundle" "${CONTENTS}/MacOS/"
+# Resources bundle
+cp -r "${BUILD_DIR}/VoiceToTextMac_VoiceToTextMac.bundle" "${CONTENTS}/Resources/"
 
 # Info.plist
 cp "${REPO_ROOT}/apps/macos/Supporting/Info.plist" "${CONTENTS}/Info.plist"
@@ -38,7 +38,7 @@ xattr -cr "${APP_OUT}"
 echo "==> Ad-hoc signing..."
 # SPM resources bundles ship without an Info.plist, which codesign requires.
 # Inject a minimal one so the bundle is signable.
-RSBUNDLE="${CONTENTS}/MacOS/VoiceToTextMac_VoiceToTextMac.bundle"
+RSBUNDLE="${CONTENTS}/Resources/VoiceToTextMac_VoiceToTextMac.bundle"
 cat > "${RSBUNDLE}/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -55,6 +55,19 @@ cat > "${RSBUNDLE}/Info.plist" <<'PLIST'
 PLIST
 xattr -cr "${APP_OUT}"
 codesign --force --deep --sign - "${APP_OUT}"
+xattr -cr "${APP_OUT}"
+codesign --verify --deep --strict --verbose=2 "${APP_OUT}"
+
+echo "==> Verifying resource bundle layout..."
+if [ ! -f "${CONTENTS}/Resources/VoiceToTextMac_VoiceToTextMac.bundle/transcription_worker.py" ]; then
+    echo "Error: transcription_worker.py missing from app resource bundle." >&2
+    exit 1
+fi
+
+if strings "${CONTENTS}/MacOS/VoiceToTextMac" | grep -q "could not load resource bundle"; then
+    echo "Error: binary still contains SwiftPM Bundle.module fatal resource accessor." >&2
+    exit 1
+fi
 
 echo ""
 echo "Done: ${APP_OUT}"
