@@ -118,6 +118,30 @@ npm run build:dmg
 
 ---
 
+## Troubleshooting
+
+**Transcription worker exits with `No such file or directory: 'ffmpeg'`**
+
+```
+The transcription worker exited with code -1: Worker did not report ready.
+Got: {"status": "error", "message": "[Errno 2] No such file or directory: 'ffmpeg'"}
+```
+
+Earlier builds handed recorded audio to `mlx-whisper` as a file path, which made
+it shell out to the `ffmpeg` command-line tool to decode the audio. On a machine
+without `ffmpeg` on `PATH`, the worker crashed during warmup on first launch.
+
+SpeakFlow now decodes its own 16 kHz mono 16-bit PCM WAV recordings in-process,
+so **`ffmpeg` is no longer required** for normal dictation. If you still see an
+ffmpeg-related error (for example after pointing the worker at audio in a
+different format), install it with:
+
+```bash
+brew install ffmpeg
+```
+
+---
+
 ## Privacy
 
 - All audio is processed locally on your Mac

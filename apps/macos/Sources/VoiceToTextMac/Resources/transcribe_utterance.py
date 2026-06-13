@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+import wave
 
 import mlx_whisper
 
@@ -68,6 +69,63 @@ def _sanitize_transcription_text_and_segments(text: str, segments: list[dict]) -
     return cleaned_text, cleaned_segments
 
 
+def _decode_pcm_wav_to_array(audio_path: str):
+    """Decode a 16 kHz mono 16-bit PCM WAV into a float32 waveform in [-1, 1].
+
+    mlx_whisper.transcribe() accepts either a file path or an already-decoded
+    audio array. Given a path it shells out to the ``ffmpeg`` CLI (via
+    mlx_whisper.audio.load_audio), which fails hard with
+    "[Errno 2] No such file or directory: 'ffmpeg'" when ffmpeg is not installed.
+
+    SpeakFlow always records 16 kHz mono 16-bit PCM WAV, so we can decode it
+    in-process with the stdlib ``wave`` module and skip the ffmpeg dependency
+    entirely. This mirrors load_audio's own int16 -> float32 / 32768.0
+    normalization.
+
+    Returns None when the file is not 16 kHz mono 16-bit PCM (or cannot be read),
+    so the caller can fall back to mlx_whisper's ffmpeg-based decoder.
+    """
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    try:
+        with wave.open(audio_path, "rb") as wav:
+            params = wav.getparams()
+            if params.nchannels != 1 or params.sampwidth != 2 or params.framerate != 16000:
+                return None
+            raw = wav.readframes(params.nframes)
+    except Exception:
+        return None
+    # WAV PCM data is always little-endian, so decode it as little-endian int16.
+    return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+
+
+def _mlx_transcribe(audio_path: str, **options):
+    """Transcribe via mlx_whisper, decoding WAV in-process to avoid the ffmpeg CLI.
+
+    Falls back to mlx_whisper's own (ffmpeg-based) decoder for any audio we can't
+    decode ourselves, and raises a clear, actionable error when that decoder's
+    ffmpeg dependency is missing.
+    """
+    audio = _decode_pcm_wav_to_array(audio_path)
+    if audio is not None:
+        return mlx_whisper.transcribe(audio, **options)
+    # Non-WAV / unexpected format: mlx_whisper falls back to decoding via the
+    # ffmpeg CLI. Probe for it up front so we can raise a clear, actionable error
+    # instead of a cryptic "[Errno 2] ... 'ffmpeg'" -- and, on macOS, avoid
+    # spawning a subprocess after the Metal/Obj-C runtime is initialized (which
+    # aborts with SIGABRT when the exec target is missing).
+    import shutil
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            "ffmpeg was not found on PATH and the audio could not be decoded "
+            "in-process (expected 16 kHz mono 16-bit PCM WAV). Install ffmpeg "
+            "(`brew install ffmpeg`) to transcribe other audio formats."
+        )
+    return mlx_whisper.transcribe(audio_path, **options)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe one utterance with mlx-whisper large-v3.")
     parser.add_argument("--input", required=True, help="Path to the WAV file to transcribe.")
@@ -91,10 +149,10 @@ def transcribe(args: argparse.Namespace) -> dict:
         "without_timestamps": True,
     }
     try:
-        result = mlx_whisper.transcribe(args.input, **options)
+        result = _mlx_transcribe(args.input, **options)
     except TypeError:
         options.pop("without_timestamps", None)
-        result = mlx_whisper.transcribe(args.input, **options)
+        result = _mlx_transcribe(args.input, **options)
 
     segments = []
     for i, seg in enumerate(result.get("segments", [])):
