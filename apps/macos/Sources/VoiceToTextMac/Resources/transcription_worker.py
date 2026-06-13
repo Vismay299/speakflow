@@ -159,7 +159,7 @@ def _decode_pcm_wav_to_array(audio_path: str):
     """
     try:
         import numpy as np
-    except Exception:
+    except ImportError:
         return None
     try:
         with wave.open(audio_path, "rb") as wav:
@@ -167,7 +167,11 @@ def _decode_pcm_wav_to_array(audio_path: str):
             if params.nchannels != 1 or params.sampwidth != 2 or params.framerate != 16000:
                 return None
             raw = wav.readframes(params.nframes)
-    except Exception:
+    except (wave.Error, EOFError):
+        # Not a WAV we can read (wrong container/format, truncated, etc.) -> let
+        # the caller fall back to ffmpeg. Real I/O errors (FileNotFoundError,
+        # PermissionError, OSError) deliberately propagate so callers see the
+        # true cause instead of a misleading "install ffmpeg" message.
         return None
     # WAV PCM data is always little-endian, so decode it as little-endian int16.
     return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0

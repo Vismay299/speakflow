@@ -122,7 +122,7 @@ npm run build:dmg
 
 **Transcription worker exits with `No such file or directory: 'ffmpeg'`**
 
-```
+```text
 The transcription worker exited with code -1: Worker did not report ready.
 Got: {"status": "error", "message": "[Errno 2] No such file or directory: 'ffmpeg'"}
 ```
